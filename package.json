@@ -1,0 +1,12 @@
+{
+  "name": "live-chat",
+  "private": true,
+  "packageManager": "pnpm@10.6.0",
+  "scripts": {
+    "dev": "pnpm -r --parallel --if-present dev",
+    "dev:web": "pnpm --filter @live-chat/web dev",
+    "dev:api": "pnpm --filter @live-chat/api dev",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck"
+  }
+}
