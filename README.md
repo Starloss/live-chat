@@ -22,16 +22,90 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 	pnpm install
 	```
 
-2. Levantar frontend + backend:
+2. Configurar variables del API:
+
+	- Copiar `apps/api/.env.example` a `apps/api/.env`.
+
+3. Levantar PostgreSQL con Docker:
+
+	```bash
+	pnpm db:up
+	```
+
+4. Ejecutar Prisma:
+
+	```bash
+	pnpm --filter @live-chat/api prisma:migrate --name init
+	pnpm --filter @live-chat/api prisma:generate
+	```
+
+5. Levantar frontend + backend:
 
 	```bash
 	pnpm dev
 	```
 
-3. URLs:
+7. (Opcional) Ejecutar smoke tests del API:
+
+	```bash
+	pnpm test:api
+	```
+
+8. CI en GitHub:
+
+	- Workflow en `.github/workflows/ci.yml`.
+	- Corre en cada push/PR a `main`.
+	- Ejecuta: instalación, `prisma generate`, migraciones, `typecheck` y tests de API.
+
+6. URLs:
 
 - Web: http://localhost:5173
 - API: http://localhost:4000
+- PostgreSQL (Docker): localhost:5433
+
+## Auth endpoints (MVP)
+
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/auth/me` (Bearer token)
+
+## Channels endpoints (MVP)
+
+- `GET /api/channels` (Bearer token)
+- `POST /api/channels` (Bearer token, body: `{ "name": "general" }`)
+- `POST /api/channels/:channelId/join` (Bearer token)
+- `GET /api/channels/:channelId/members` (Bearer token, requiere membresía)
+
+## Messages endpoints (MVP)
+
+- `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30` (Bearer token, requiere membresía)
+- `POST /api/channels/:channelId/messages` (Bearer token, body: `{ "body": "hola" }`, requiere membresía)
+
+## Presence endpoint (MVP)
+
+- `GET /api/presence?channelId=<id>` (Bearer token, requiere membresía en el canal)
+
+## Socket.IO (MVP)
+
+- Namespace: `/chat`
+- Auth en handshake: `auth: { token: <JWT> }`
+- Eventos cliente -> servidor:
+	- `channel:join` con `{ channelId }`
+	- `message:send` con `{ channelId, body }`
+	- `typing:start` con `{ channelId }`
+	- `typing:stop` con `{ channelId }`
+- Eventos servidor -> cliente:
+	- `channel:joined`
+	- `message:new`
+	- `presence:update`
+	- `typing:update`
+	- `system:message`
+
+## Hardening básico
+
+- Rate limiting en `/api` y límites más estrictos en `/api/auth`.
+- Manejo global uniforme de errores (`404` y `500` JSON).
+- Wrappers async en rutas para capturar excepciones de controladores.
 
 ## Siguiente paso sugerido
 
