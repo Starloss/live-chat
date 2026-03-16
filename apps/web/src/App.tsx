@@ -13,7 +13,32 @@ interface UserDto {
 interface ChannelDto {
   id: string;
   name: string;
+  visibility: "PUBLIC" | "PRIVATE";
   role: "OWNER" | "MEMBER";
+}
+
+interface DiscoveredChannelDto {
+  id: string;
+  name: string;
+  visibility: "PUBLIC" | "PRIVATE";
+  memberCount: number;
+  isOwner: boolean;
+  membershipRole: "OWNER" | "MEMBER" | null;
+  joinRequest: {
+    id: string;
+    status: "PENDING" | "APPROVED" | "DENIED";
+  } | null;
+}
+
+interface ChannelJoinRequestDto {
+  id: string;
+  status: "PENDING" | "APPROVED" | "DENIED";
+  createdAt: string;
+  user: {
+    id: string;
+    username: string;
+    email: string;
+  };
 }
 
 interface MessageDto {
@@ -75,7 +100,10 @@ export function App() {
   const [channels, setChannels] = useState<ChannelDto[]>([]);
   const [selectedChannelId, setSelectedChannelId] = useState<string>("");
   const [newChannelName, setNewChannelName] = useState("");
-  const [joinChannelId, setJoinChannelId] = useState("");
+  const [newChannelVisibility, setNewChannelVisibility] = useState<"PUBLIC" | "PRIVATE">("PUBLIC");
+  const [channelSearchTerm, setChannelSearchTerm] = useState("");
+  const [discoveredChannels, setDiscoveredChannels] = useState<DiscoveredChannelDto[]>([]);
+  const [ownerRequests, setOwnerRequests] = useState<ChannelJoinRequestDto[]>([]);
   const [messages, setMessages] = useState<MessageDto[]>([]);
   const [messageText, setMessageText] = useState("");
   const [presence, setPresence] = useState<PresenceDto[]>([]);
@@ -90,6 +118,8 @@ export function App() {
   const selectedChannel = useMemo(() => {
     return channels.find((channel) => channel.id === selectedChannelId) ?? null;
   }, [channels, selectedChannelId]);
+
+  const isSelectedChannelOwner = selectedChannel?.role === "OWNER";
 
   useEffect(() => {
     if (!token) {
@@ -118,6 +148,29 @@ export function App() {
       }
     })();
   }, [token, selectedChannelId]);
+
+  useEffect(() => {
+    if (!token) {
+      setDiscoveredChannels([]);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await apiRequest<{ channels: DiscoveredChannelDto[] }>(
+            `/api/channels/discover?query=${encodeURIComponent(channelSearchTerm)}`,
+            { token }
+          );
+          setDiscoveredChannels(response.channels);
+        } catch (error) {
+          setErrorMessage(error instanceof Error ? error.message : "No se pudo buscar canales");
+        }
+      })();
+    }, 200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [token, channelSearchTerm]);
 
   useEffect(() => {
     if (!token || !user) {
@@ -236,6 +289,25 @@ export function App() {
     })();
   }, [token, selectedChannelId]);
 
+  useEffect(() => {
+    if (!token || !selectedChannelId || !isSelectedChannelOwner) {
+      setOwnerRequests([]);
+      return;
+    }
+
+    void (async () => {
+      try {
+        const response = await apiRequest<{ requests: ChannelJoinRequestDto[] }>(
+          `/api/channels/${selectedChannelId}/requests`,
+          { token }
+        );
+        setOwnerRequests(response.requests);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "No se pudieron cargar solicitudes");
+      }
+    })();
+  }, [token, selectedChannelId, isSelectedChannelOwner]);
+
   async function refreshChannels() {
     if (!token) {
       return;
@@ -308,20 +380,22 @@ export function App() {
       const response = await apiRequest<{ channel: ChannelDto }>("/api/channels", {
         method: "POST",
         token,
-        body: { name: value }
+        body: {
+          name: value,
+          visibility: newChannelVisibility
+        }
       });
 
       await refreshChannels();
       setSelectedChannelId(response.channel.id);
       setNewChannelName("");
+      setNewChannelVisibility("PUBLIC");
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "No se pudo crear el canal");
     }
   }
 
-  async function handleJoinChannel(event: FormEvent) {
-    event.preventDefault();
-    const channelId = joinChannelId.trim();
+  async function handleJoinChannel(channelId: string) {
     if (!channelId || !token) {
       return;
     }
@@ -329,16 +403,55 @@ export function App() {
     setErrorMessage("");
 
     try {
-      await apiRequest(`/api/channels/${channelId}/join`, {
+      const response = await apiRequest<{
+        result: "joined" | "requested";
+        request?: { id: string; status: "PENDING" | "APPROVED" | "DENIED" };
+      }>(`/api/channels/${channelId}/join`, {
         method: "POST",
         token
       });
 
-      await refreshChannels();
-      setSelectedChannelId(channelId);
-      setJoinChannelId("");
+      if (response.result === "joined") {
+        await refreshChannels();
+        setSelectedChannelId(channelId);
+        setErrorMessage("");
+      } else {
+        setErrorMessage("Solicitud enviada. Espera aprobación del owner.");
+      }
+
+      const discoverResponse = await apiRequest<{ channels: DiscoveredChannelDto[] }>(
+        `/api/channels/discover?query=${encodeURIComponent(channelSearchTerm)}`,
+        { token }
+      );
+      setDiscoveredChannels(discoverResponse.channels);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "No se pudo unir al canal");
+    }
+  }
+
+  async function handleResolveRequest(requestId: string, action: "approve" | "deny") {
+    if (!token || !selectedChannelId || !isSelectedChannelOwner) {
+      return;
+    }
+
+    setErrorMessage("");
+
+    try {
+      await apiRequest(`/api/channels/${selectedChannelId}/requests/${requestId}/${action}`, {
+        method: "POST",
+        token
+      });
+
+      const [requestsResponse] = await Promise.all([
+        apiRequest<{ requests: ChannelJoinRequestDto[] }>(`/api/channels/${selectedChannelId}/requests`, {
+          token
+        }),
+        refreshChannels()
+      ]);
+
+      setOwnerRequests(requestsResponse.requests);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "No se pudo resolver la solicitud");
     }
   }
 
@@ -473,17 +586,54 @@ export function App() {
             value={newChannelName}
             onChange={(event) => setNewChannelName(event.target.value)}
           />
+          <select
+            value={newChannelVisibility}
+            onChange={(event) => setNewChannelVisibility(event.target.value as "PUBLIC" | "PRIVATE")}
+          >
+            <option value="PUBLIC">PUBLIC</option>
+            <option value="PRIVATE">PRIVATE</option>
+          </select>
           <button type="submit">Crear</button>
         </form>
 
-        <form onSubmit={handleJoinChannel} className="form-inline">
+        <div className="discover card-muted">
+          <h3>Canales activos</h3>
           <input
-            placeholder="channelId"
-            value={joinChannelId}
-            onChange={(event) => setJoinChannelId(event.target.value)}
+            placeholder="Buscar canal por nombre"
+            value={channelSearchTerm}
+            onChange={(event) => setChannelSearchTerm(event.target.value)}
           />
-          <button type="submit">Join</button>
-        </form>
+
+          <ul className="discover-list">
+            {discoveredChannels.map((channel) => {
+              const alreadyMember = Boolean(channel.membershipRole);
+              const pendingRequest = channel.joinRequest?.status === "PENDING";
+
+              return (
+                <li key={channel.id}>
+                  <div>
+                    <strong>#{channel.name}</strong>
+                    <p className="hint compact">
+                      {channel.visibility} · {channel.memberCount} miembros
+                    </p>
+                  </div>
+
+                  {alreadyMember ? (
+                    <button type="button" className="ghost" onClick={() => setSelectedChannelId(channel.id)}>
+                      Abrir
+                    </button>
+                  ) : pendingRequest ? (
+                    <span className="pill pending">Pendiente</span>
+                  ) : (
+                    <button type="button" onClick={() => void handleJoinChannel(channel.id)}>
+                      {channel.visibility === "PUBLIC" ? "Unirme" : "Solicitar"}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
 
         <ul className="channel-list">
           {channels.map((channel) => (
@@ -494,7 +644,9 @@ export function App() {
                 onClick={() => setSelectedChannelId(channel.id)}
               >
                 <span>#{channel.name}</span>
-                <small>{channel.role}</small>
+                <small>
+                  {channel.role} · {channel.visibility}
+                </small>
               </button>
             </li>
           ))}
@@ -524,6 +676,35 @@ export function App() {
             </li>
           ))}
         </ul>
+
+        {isSelectedChannelOwner ? (
+          <section className="requests card-muted">
+            <h3>Solicitudes pendientes</h3>
+            {ownerRequests.length === 0 ? <p className="hint compact">Sin solicitudes pendientes</p> : null}
+            <ul className="request-list">
+              {ownerRequests.map((request) => (
+                <li key={request.id}>
+                  <div>
+                    <strong>{request.user.username}</strong>
+                    <p className="hint compact">{request.user.email}</p>
+                  </div>
+                  <div className="request-actions">
+                    <button type="button" onClick={() => void handleResolveRequest(request.id, "approve")}>
+                      Aprobar
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => void handleResolveRequest(request.id, "deny")}
+                    >
+                      Denegar
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
 
         {typingUsers.length > 0 ? <p className="hint">{typingUsers.join(", ")} está escribiendo...</p> : null}
 

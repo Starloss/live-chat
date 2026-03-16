@@ -72,9 +72,13 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 ## Channels endpoints (MVP)
 
 - `GET /api/channels` (Bearer token)
-- `POST /api/channels` (Bearer token, body: `{ "name": "general" }`)
-- `POST /api/channels/:channelId/join` (Bearer token)
+- `GET /api/channels/discover?query=<text>` (Bearer token, búsqueda de canales activos)
+- `POST /api/channels` (Bearer token, body: `{ "name": "general", "visibility": "PUBLIC" | "PRIVATE" }`)
+- `POST /api/channels/:channelId/join` (Bearer token, público=join directo, privado=crea solicitud)
 - `GET /api/channels/:channelId/members` (Bearer token, requiere membresía)
+- `GET /api/channels/:channelId/requests` (Bearer token, solo OWNER)
+- `POST /api/channels/:channelId/requests/:requestId/approve` (Bearer token, solo OWNER)
+- `POST /api/channels/:channelId/requests/:requestId/deny` (Bearer token, solo OWNER)
 
 ## Messages endpoints (MVP)
 

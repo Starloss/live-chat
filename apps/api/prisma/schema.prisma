@@ -15,23 +15,42 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  createdChannels Channel[]       @relation("channel_creator")
-  memberships     ChannelMember[]
-  messages        Message[]
-  presences       UserPresence[]
-  typingStates    TypingState[]
+  createdChannels     Channel[]            @relation("channel_creator")
+  memberships         ChannelMember[]
+  messages            Message[]
+  presences           UserPresence[]
+  typingStates        TypingState[]
+  channelJoinRequests ChannelJoinRequest[]
 }
 
 model Channel {
-  id          String   @id @default(cuid())
-  name        String   @unique
+  id          String            @id @default(cuid())
+  name        String            @unique
   createdById String
-  createdAt   DateTime @default(now())
+  visibility  ChannelVisibility @default(PUBLIC)
+  createdAt   DateTime          @default(now())
 
-  createdBy User            @relation("channel_creator", fields: [createdById], references: [id])
-  members   ChannelMember[]
-  messages  Message[]
-  typing    TypingState[]
+  createdBy    User                 @relation("channel_creator", fields: [createdById], references: [id])
+  members      ChannelMember[]
+  messages     Message[]
+  typing       TypingState[]
+  joinRequests ChannelJoinRequest[]
+}
+
+model ChannelJoinRequest {
+  id        String               @id @default(cuid())
+  channelId String
+  userId    String
+  status    ChannelRequestStatus @default(PENDING)
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, userId])
+  @@index([channelId, status])
+  @@index([userId, status])
 }
 
 model ChannelMember {
@@ -98,4 +117,15 @@ enum ChannelRole {
 enum PresenceStatus {
   ONLINE
   OFFLINE
+}
+
+enum ChannelVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum ChannelRequestStatus {
+  PENDING
+  APPROVED
+  DENIED
 }
