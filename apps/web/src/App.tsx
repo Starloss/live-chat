@@ -1,8 +1,8 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 
 const API_BASE_URL = "http://localhost:4000";
-const TOKEN_STORAGE_KEY = "live-chat-token";
+const BACKGROUND_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 interface UserDto {
   id: string;
@@ -37,7 +37,6 @@ interface ChannelJoinRequestDto {
   user: {
     id: string;
     username: string;
-    email: string;
   };
 }
 
@@ -63,6 +62,16 @@ interface ApiErrorResponse {
   message?: string;
 }
 
+class ApiHttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiHttpError";
+    this.status = status;
+  }
+}
+
 async function apiRequest<TResponse>(
   path: string,
   options?: {
@@ -77,15 +86,16 @@ async function apiRequest<TResponse>(
       "Content-Type": "application/json",
       ...(options?.token ? { Authorization: `Bearer ${options.token}` } : {})
     },
+    credentials: "include",
     ...(options?.body ? { body: JSON.stringify(options.body) } : {})
   });
 
   if (!response.ok) {
     const error = (await response.json().catch(() => ({}))) as ApiErrorResponse;
-    throw new Error(error.message ?? `Error HTTP ${response.status}`);
+    throw new ApiHttpError(response.status, error.message ?? `Error HTTP ${response.status}`);
   }
 
-  return (await response.json()) as TResponse;
+  return (await response.json().catch(() => ({}))) as TResponse;
 }
 
 export function App() {
@@ -95,8 +105,9 @@ export function App() {
     email: "",
     password: ""
   });
-  const [token, setToken] = useState<string>(() => localStorage.getItem(TOKEN_STORAGE_KEY) ?? "");
+  const [token, setToken] = useState<string>("");
   const [user, setUser] = useState<UserDto | null>(null);
+  const [isSessionReady, setIsSessionReady] = useState(false);
   const [channels, setChannels] = useState<ChannelDto[]>([]);
   const [selectedChannelId, setSelectedChannelId] = useState<string>("");
   const [newChannelName, setNewChannelName] = useState("");
@@ -112,8 +123,131 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState<string>("");
 
   const socketRef = useRef<Socket | null>(null);
+  const tokenRef = useRef("");
+  const refreshInFlightRef = useRef<Promise<string | null> | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const typingActiveRef = useRef(false);
+
+  const resetSessionState = useCallback(() => {
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    setConnected(false);
+    setToken("");
+    setUser(null);
+    setChannels([]);
+    setSelectedChannelId("");
+    setDiscoveredChannels([]);
+    setOwnerRequests([]);
+    setMessages([]);
+    setPresence([]);
+    setTypingUsers([]);
+    setMessageText("");
+    typingActiveRef.current = false;
+
+    if (typingTimeoutRef.current) {
+      window.clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+  }, []);
+
+  const refreshAccessToken = useCallback(async () => {
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
+    }
+
+    const refreshPromise = (async () => {
+      try {
+        const response = await apiRequest<{ user: UserDto; accessToken: string }>("/api/auth/refresh", {
+          method: "POST"
+        });
+
+        setToken(response.accessToken);
+        setUser(response.user);
+        return response.accessToken;
+      } catch {
+        resetSessionState();
+        return null;
+      } finally {
+        refreshInFlightRef.current = null;
+      }
+    })();
+
+    refreshInFlightRef.current = refreshPromise;
+    return refreshPromise;
+  }, [resetSessionState]);
+
+  const authenticatedRequest = useCallback(
+    async <TResponse,>(
+      path: string,
+      options?: {
+        method?: "GET" | "POST";
+        body?: unknown;
+      }
+    ) => {
+      const currentToken = tokenRef.current;
+      if (!currentToken) {
+        throw new Error("No autenticado");
+      }
+
+      try {
+        return await apiRequest<TResponse>(path, {
+          method: options?.method,
+          body: options?.body,
+          token: currentToken
+        });
+      } catch (error) {
+        if (!(error instanceof ApiHttpError) || error.status !== 401) {
+          throw error;
+        }
+
+        const rotatedToken = await refreshAccessToken();
+        if (!rotatedToken) {
+          throw new Error("Sesión expirada");
+        }
+
+        return apiRequest<TResponse>(path, {
+          method: options?.method,
+          body: options?.body,
+          token: rotatedToken
+        });
+      }
+    },
+    [refreshAccessToken]
+  );
+
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void (async () => {
+      await refreshAccessToken();
+
+      if (isMounted) {
+        setIsSessionReady(true);
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [refreshAccessToken]);
+
+  useEffect(() => {
+    if (!token || !user) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshAccessToken();
+    }, BACKGROUND_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [token, user, refreshAccessToken]);
 
   const selectedChannel = useMemo(() => {
     return channels.find((channel) => channel.id === selectedChannelId) ?? null;
@@ -132,8 +266,8 @@ export function App() {
     void (async () => {
       try {
         const [meResponse, channelsResponse] = await Promise.all([
-          apiRequest<{ user: UserDto }>("/api/auth/me", { token }),
-          apiRequest<{ channels: ChannelDto[] }>("/api/channels", { token })
+          authenticatedRequest<{ user: UserDto }>("/api/auth/me"),
+          authenticatedRequest<{ channels: ChannelDto[] }>("/api/channels")
         ]);
 
         setUser(meResponse.user);
@@ -142,12 +276,11 @@ export function App() {
           setSelectedChannelId(channelsResponse.channels[0].id);
         }
       } catch (error) {
-        setToken("");
-        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        resetSessionState();
         setErrorMessage(error instanceof Error ? error.message : "No se pudo cargar la sesión");
       }
     })();
-  }, [token, selectedChannelId]);
+  }, [token, selectedChannelId, authenticatedRequest, resetSessionState]);
 
   useEffect(() => {
     if (!token) {
@@ -158,9 +291,8 @@ export function App() {
     const timeoutId = window.setTimeout(() => {
       void (async () => {
         try {
-          const response = await apiRequest<{ channels: DiscoveredChannelDto[] }>(
-            `/api/channels/discover?query=${encodeURIComponent(channelSearchTerm)}`,
-            { token }
+          const response = await authenticatedRequest<{ channels: DiscoveredChannelDto[] }>(
+            `/api/channels/discover?query=${encodeURIComponent(channelSearchTerm)}`
           );
           setDiscoveredChannels(response.channels);
         } catch (error) {
@@ -170,7 +302,7 @@ export function App() {
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [token, channelSearchTerm]);
+  }, [token, channelSearchTerm, authenticatedRequest]);
 
   useEffect(() => {
     if (!token || !user) {
@@ -268,11 +400,10 @@ export function App() {
     void (async () => {
       try {
         const [messagesResponse, presenceResponse] = await Promise.all([
-          apiRequest<{ messages: MessageDto[]; nextCursor: string | null }>(
-            `/api/channels/${selectedChannelId}/messages?limit=30`,
-            { token }
+          authenticatedRequest<{ messages: MessageDto[]; nextCursor: string | null }>(
+            `/api/channels/${selectedChannelId}/messages?limit=30`
           ),
-          apiRequest<{ users: PresenceDto[] }>(`/api/presence?channelId=${selectedChannelId}`, { token })
+          authenticatedRequest<{ users: PresenceDto[] }>(`/api/presence?channelId=${selectedChannelId}`)
         ]);
 
         setMessages([...messagesResponse.messages].reverse());
@@ -287,7 +418,7 @@ export function App() {
         setErrorMessage(error instanceof Error ? error.message : "No se pudo cargar el canal");
       }
     })();
-  }, [token, selectedChannelId]);
+  }, [token, selectedChannelId, authenticatedRequest]);
 
   useEffect(() => {
     if (!token || !selectedChannelId || !isSelectedChannelOwner) {
@@ -297,23 +428,22 @@ export function App() {
 
     void (async () => {
       try {
-        const response = await apiRequest<{ requests: ChannelJoinRequestDto[] }>(
-          `/api/channels/${selectedChannelId}/requests`,
-          { token }
+        const response = await authenticatedRequest<{ requests: ChannelJoinRequestDto[] }>(
+          `/api/channels/${selectedChannelId}/requests`
         );
         setOwnerRequests(response.requests);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "No se pudieron cargar solicitudes");
       }
     })();
-  }, [token, selectedChannelId, isSelectedChannelOwner]);
+  }, [token, selectedChannelId, isSelectedChannelOwner, authenticatedRequest]);
 
   async function refreshChannels() {
-    if (!token) {
+    if (!tokenRef.current) {
       return;
     }
 
-    const response = await apiRequest<{ channels: ChannelDto[] }>("/api/channels", { token });
+    const response = await authenticatedRequest<{ channels: ChannelDto[] }>("/api/channels");
     setChannels(response.channels);
 
     if (!selectedChannelId && response.channels.length > 0) {
@@ -344,7 +474,6 @@ export function App() {
         body: payload
       });
 
-      localStorage.setItem(TOKEN_STORAGE_KEY, response.accessToken);
       setToken(response.accessToken);
       setUser(response.user);
       setAuthForm({ username: "", email: "", password: "" });
@@ -353,18 +482,17 @@ export function App() {
     }
   }
 
-  function handleLogout() {
-    socketRef.current?.disconnect();
-    socketRef.current = null;
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    setToken("");
-    setUser(null);
-    setChannels([]);
-    setSelectedChannelId("");
-    setMessages([]);
-    setPresence([]);
-    setTypingUsers([]);
-    setMessageText("");
+  async function handleLogout() {
+    try {
+      await apiRequest<{ message: string }>("/api/auth/logout", {
+        method: "POST",
+        token: tokenRef.current || undefined
+      });
+    } catch {
+      // Logout local aun si falla la red para no dejar sesion activa en UI.
+    }
+
+    resetSessionState();
   }
 
   async function handleCreateChannel(event: FormEvent) {
@@ -377,9 +505,8 @@ export function App() {
     setErrorMessage("");
 
     try {
-      const response = await apiRequest<{ channel: ChannelDto }>("/api/channels", {
+      const response = await authenticatedRequest<{ channel: ChannelDto }>("/api/channels", {
         method: "POST",
-        token,
         body: {
           name: value,
           visibility: newChannelVisibility
@@ -403,12 +530,11 @@ export function App() {
     setErrorMessage("");
 
     try {
-      const response = await apiRequest<{
+      const response = await authenticatedRequest<{
         result: "joined" | "requested";
         request?: { id: string; status: "PENDING" | "APPROVED" | "DENIED" };
       }>(`/api/channels/${channelId}/join`, {
-        method: "POST",
-        token
+        method: "POST"
       });
 
       if (response.result === "joined") {
@@ -419,9 +545,8 @@ export function App() {
         setErrorMessage("Solicitud enviada. Espera aprobación del owner.");
       }
 
-      const discoverResponse = await apiRequest<{ channels: DiscoveredChannelDto[] }>(
-        `/api/channels/discover?query=${encodeURIComponent(channelSearchTerm)}`,
-        { token }
+      const discoverResponse = await authenticatedRequest<{ channels: DiscoveredChannelDto[] }>(
+        `/api/channels/discover?query=${encodeURIComponent(channelSearchTerm)}`
       );
       setDiscoveredChannels(discoverResponse.channels);
     } catch (error) {
@@ -437,15 +562,12 @@ export function App() {
     setErrorMessage("");
 
     try {
-      await apiRequest(`/api/channels/${selectedChannelId}/requests/${requestId}/${action}`, {
-        method: "POST",
-        token
+      await authenticatedRequest(`/api/channels/${selectedChannelId}/requests/${requestId}/${action}`, {
+        method: "POST"
       });
 
       const [requestsResponse] = await Promise.all([
-        apiRequest<{ requests: ChannelJoinRequestDto[] }>(`/api/channels/${selectedChannelId}/requests`, {
-          token
-        }),
+        authenticatedRequest<{ requests: ChannelJoinRequestDto[] }>(`/api/channels/${selectedChannelId}/requests`),
         refreshChannels()
       ]);
 
@@ -453,6 +575,15 @@ export function App() {
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "No se pudo resolver la solicitud");
     }
+  }
+
+  if (!isSessionReady) {
+    return (
+      <main className="auth-container">
+        <h1>Live Chat MVP</h1>
+        <p className="hint">Restaurando sesión...</p>
+      </main>
+    );
   }
 
   function emitTypingStop() {
@@ -608,6 +739,7 @@ export function App() {
             {discoveredChannels.map((channel) => {
               const alreadyMember = Boolean(channel.membershipRole);
               const pendingRequest = channel.joinRequest?.status === "PENDING";
+              const isPrivateChannel = channel.visibility === "PRIVATE";
 
               return (
                 <li key={channel.id}>
@@ -622,11 +754,17 @@ export function App() {
                     <button type="button" className="ghost" onClick={() => setSelectedChannelId(channel.id)}>
                       Abrir
                     </button>
+                  ) : isPrivateChannel && pendingRequest ? (
+                    <button type="button" onClick={() => void handleJoinChannel(channel.id)}>
+                      Aceptar invitación
+                    </button>
+                  ) : isPrivateChannel ? (
+                    <span className="pill pending">Solo invitación</span>
                   ) : pendingRequest ? (
                     <span className="pill pending">Pendiente</span>
                   ) : (
                     <button type="button" onClick={() => void handleJoinChannel(channel.id)}>
-                      {channel.visibility === "PUBLIC" ? "Unirme" : "Solicitar"}
+                      Unirme
                     </button>
                   )}
                 </li>
@@ -686,7 +824,6 @@ export function App() {
                 <li key={request.id}>
                   <div>
                     <strong>{request.user.username}</strong>
-                    <p className="hint compact">{request.user.email}</p>
                   </div>
                   <div className="request-actions">
                     <button type="button" onClick={() => void handleResolveRequest(request.id, "approve")}>

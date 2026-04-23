@@ -22,7 +22,12 @@ const authRateLimit = createRateLimitMiddleware({
 export function createApp() {
   const app = express();
 
-  app.use(cors({ origin: env.webOrigin }));
+  app.use(
+    cors({
+      origin: env.webOrigin,
+      credentials: true
+    })
+  );
   app.use(express.json());
 
   app.use("/api", apiRateLimit);

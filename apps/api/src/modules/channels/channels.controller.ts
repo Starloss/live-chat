@@ -26,6 +26,67 @@ const discoverChannelsQuerySchema = z.object({
   query: z.string().trim().max(50).optional()
 });
 
+const createChannelInvitationSchema = z
+  .object({
+    username: z.string().trim().min(3).max(30).optional(),
+    email: z.string().trim().email().optional()
+  })
+  .refine((data) => Boolean(data.username || data.email), {
+    message: "Payload inválido"
+  });
+
+const channelMembershipSelect = {
+  id: true,
+  channelId: true,
+  userId: true,
+  role: true,
+  joinedAt: true
+} satisfies Prisma.ChannelMemberSelect;
+
+async function acceptPendingPrivateInvitation(channelId: string, userId: string) {
+  return prisma.$transaction(async (transaction) => {
+    const invitation = await transaction.channelJoinRequest.findFirst({
+      where: {
+        channelId,
+        userId,
+        status: ChannelRequestStatus.PENDING
+      },
+      select: {
+        id: true
+      }
+    });
+
+    if (!invitation) {
+      return null;
+    }
+
+    await transaction.channelJoinRequest.update({
+      where: {
+        id: invitation.id
+      },
+      data: {
+        status: ChannelRequestStatus.APPROVED
+      }
+    });
+
+    return transaction.channelMember.upsert({
+      where: {
+        channelId_userId: {
+          channelId,
+          userId
+        }
+      },
+      update: {},
+      create: {
+        channelId,
+        userId,
+        role: "MEMBER"
+      },
+      select: channelMembershipSelect
+    });
+  });
+}
+
 function getAuthUserId(req: Request) {
   return req.authUser?.id;
 }
@@ -153,13 +214,7 @@ export async function joinChannel(req: Request, res: Response) {
       channelId,
       userId
     },
-    select: {
-      id: true,
-      channelId: true,
-      userId: true,
-      role: true,
-      joinedAt: true
-    }
+    select: channelMembershipSelect
   });
 
   if (existingMembership) {
@@ -176,13 +231,7 @@ export async function joinChannel(req: Request, res: Response) {
         userId,
         role: "MEMBER"
       },
-      select: {
-        id: true,
-        channelId: true,
-        userId: true,
-        role: true,
-        joinedAt: true
-      }
+      select: channelMembershipSelect
     });
 
     return res.status(200).json({
@@ -191,31 +240,15 @@ export async function joinChannel(req: Request, res: Response) {
     });
   }
 
-  const joinRequest = await prisma.channelJoinRequest.upsert({
-    where: {
-      channelId_userId: {
-        channelId,
-        userId
-      }
-    },
-    update: {
-      status: ChannelRequestStatus.PENDING
-    },
-    create: {
-      channelId,
-      userId,
-      status: ChannelRequestStatus.PENDING
-    },
-    select: {
-      id: true,
-      status: true,
-      updatedAt: true
-    }
-  });
+  const membership = await acceptPendingPrivateInvitation(channelId, userId);
+
+  if (!membership) {
+    return res.status(404).json({ message: "Canal no encontrado" });
+  }
 
   return res.status(200).json({
-    result: "requested",
-    request: joinRequest
+    result: "joined",
+    membership
   });
 }
 
@@ -235,8 +268,7 @@ export async function getChannelMembers(req: Request, res: Response) {
       user: {
         select: {
           id: true,
-          username: true,
-          email: true
+          username: true
         }
       }
     }
@@ -246,7 +278,6 @@ export async function getChannelMembers(req: Request, res: Response) {
     members: members.map((member) => ({
       id: member.user.id,
       username: member.user.username,
-      email: member.user.email,
       role: member.role,
       joinedAt: member.joinedAt
     }))
@@ -268,6 +299,26 @@ export async function discoverChannels(req: Request, res: Response) {
 
   const channels = await prisma.channel.findMany({
     where: {
+      OR: [
+        {
+          visibility: ChannelVisibility.PUBLIC
+        },
+        {
+          members: {
+            some: {
+              userId
+            }
+          }
+        },
+        {
+          joinRequests: {
+            some: {
+              userId,
+              status: ChannelRequestStatus.PENDING
+            }
+          }
+        }
+      ],
       ...(query
         ? {
             name: {
@@ -300,7 +351,8 @@ export async function discoverChannels(req: Request, res: Response) {
       },
       joinRequests: {
         where: {
-          userId
+          userId,
+          status: ChannelRequestStatus.PENDING
         },
         select: {
           id: true,
@@ -322,6 +374,157 @@ export async function discoverChannels(req: Request, res: Response) {
       membershipRole: channel.members[0]?.role ?? null,
       joinRequest: channel.joinRequests[0] ?? null
     }))
+  });
+}
+
+export async function inviteChannelMember(req: Request, res: Response) {
+  const userId = getAuthUserId(req);
+  if (!userId) {
+    return res.status(401).json({ message: "No autenticado" });
+  }
+
+  const parsedParams = channelIdParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ message: "Parámetros inválidos" });
+  }
+
+  const parsedBody = createChannelInvitationSchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    return res.status(400).json({ message: "Payload inválido" });
+  }
+
+  const { channelId } = parsedParams.data;
+  const { username, email } = parsedBody.data;
+
+  const channel = await prisma.channel.findUnique({
+    where: { id: channelId },
+    select: {
+      id: true,
+      createdById: true,
+      visibility: true
+    }
+  });
+
+  if (!channel) {
+    return res.status(404).json({ message: "Canal no encontrado" });
+  }
+
+  if (channel.createdById !== userId) {
+    return res.status(403).json({ message: "Solo el owner puede invitar miembros" });
+  }
+
+  if (channel.visibility !== ChannelVisibility.PRIVATE) {
+    return res.status(400).json({ message: "Solo los canales privados usan invitaciones" });
+  }
+
+  const targetUser = await prisma.user.findFirst({
+    where:
+      username && email
+        ? {
+            username,
+            email
+          }
+        : username
+          ? {
+              username
+            }
+          : {
+              email
+            },
+    select: {
+      id: true
+    }
+  });
+
+  if (targetUser && targetUser.id !== userId) {
+    const existingMember = await prisma.channelMember.findFirst({
+      where: {
+        channelId,
+        userId: targetUser.id
+      },
+      select: {
+        id: true
+      }
+    });
+
+    if (!existingMember) {
+      await prisma.channelJoinRequest.upsert({
+        where: {
+          channelId_userId: {
+            channelId,
+            userId: targetUser.id
+          }
+        },
+        update: {
+          status: ChannelRequestStatus.PENDING
+        },
+        create: {
+          channelId,
+          userId: targetUser.id,
+          status: ChannelRequestStatus.PENDING
+        }
+      });
+    }
+  }
+
+  return res.status(202).json({
+    message: "Si el usuario existe y es elegible, la invitación será procesada"
+  });
+}
+
+export async function acceptChannelInvitation(req: Request, res: Response) {
+  const userId = getAuthUserId(req);
+  if (!userId) {
+    return res.status(401).json({ message: "No autenticado" });
+  }
+
+  const parsedParams = channelIdParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ message: "Parámetros inválidos" });
+  }
+
+  const { channelId } = parsedParams.data;
+
+  const channel = await prisma.channel.findUnique({
+    where: { id: channelId },
+    select: {
+      id: true,
+      visibility: true
+    }
+  });
+
+  if (!channel) {
+    return res.status(404).json({ message: "Canal no encontrado" });
+  }
+
+  if (channel.visibility !== ChannelVisibility.PRIVATE) {
+    return res.status(400).json({ message: "Canal público no requiere invitación" });
+  }
+
+  const existingMembership = await prisma.channelMember.findFirst({
+    where: {
+      channelId,
+      userId
+    },
+    select: channelMembershipSelect
+  });
+
+  if (existingMembership) {
+    return res.status(200).json({
+      result: "joined",
+      membership: existingMembership
+    });
+  }
+
+  const membership = await acceptPendingPrivateInvitation(channelId, userId);
+
+  if (!membership) {
+    return res.status(404).json({ message: "Canal no encontrado" });
+  }
+
+  return res.status(200).json({
+    result: "joined",
+    membership
   });
 }
 
@@ -369,8 +572,7 @@ export async function listChannelJoinRequests(req: Request, res: Response) {
       user: {
         select: {
           id: true,
-          username: true,
-          email: true
+          username: true
         }
       }
     }

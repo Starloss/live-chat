@@ -1,6 +1,18 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
+import { createChannelMessageIdempotent } from "./message-idempotency";
+import {
+  markMessageReceiptBodySchema,
+  markMessageReceiptParamsSchema
+} from "./message-receipt.schema";
+import {
+  applyMessageReceiptTransition,
+  MessageReceiptTransitionError,
+  messageReceiptSelect,
+  toMessageReceiptState
+} from "./message-receipts";
+import { clientMessageIdSchema } from "./message-send.schema";
 
 const listMessagesQuerySchema = z.object({
   cursor: z.string().trim().min(1).optional(),
@@ -8,13 +20,15 @@ const listMessagesQuerySchema = z.object({
 });
 
 const createMessageBodySchema = z.object({
-  body: z.string().trim().min(1).max(2000)
+  body: z.string().trim().min(1).max(2000),
+  clientMessageId: clientMessageIdSchema.optional()
 });
 
 export async function listChannelMessages(req: Request, res: Response) {
   const channelId = req.channelAccess?.channelId;
+  const viewerUserId = req.authUser?.id;
 
-  if (!channelId) {
+  if (!channelId || !viewerUserId) {
     return res.status(403).json({ message: "No tienes acceso a este canal" });
   }
 
@@ -29,6 +43,21 @@ export async function listChannelMessages(req: Request, res: Response) {
     where: {
       channelId,
       deletedAt: null
+    },
+    select: {
+      id: true,
+      channelId: true,
+      authorId: true,
+      body: true,
+      createdAt: true,
+      updatedAt: true,
+      receipts: {
+        where: {
+          userId: viewerUserId
+        },
+        take: 1,
+        select: messageReceiptSelect
+      }
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: limit,
@@ -49,7 +78,8 @@ export async function listChannelMessages(req: Request, res: Response) {
       authorId: message.authorId,
       body: message.body,
       createdAt: message.createdAt,
-      updatedAt: message.updatedAt
+      updatedAt: message.updatedAt,
+      viewerReceipt: toMessageReceiptState(message.receipts[0] ?? null)
     })),
     nextCursor
   });
@@ -68,23 +98,54 @@ export async function createChannelMessage(req: Request, res: Response) {
     return res.status(400).json({ message: "Payload inválido" });
   }
 
-  const { body } = parsedBody.data;
+  const { body, clientMessageId } = parsedBody.data;
 
-  const message = await prisma.message.create({
-    data: {
-      channelId,
-      authorId,
-      body
-    },
-    select: {
-      id: true,
-      channelId: true,
-      authorId: true,
-      body: true,
-      createdAt: true,
-      updatedAt: true
-    }
+  const { message, deduplicated } = await createChannelMessageIdempotent({
+    channelId,
+    authorId,
+    body,
+    clientMessageId
   });
 
-  return res.status(201).json({ message });
+  return res.status(201).json({
+    message,
+    clientMessageId: clientMessageId ?? null,
+    deduplicated
+  });
+}
+
+export async function markMessageReceipt(req: Request, res: Response) {
+  const channelId = req.channelAccess?.channelId;
+  const userId = req.authUser?.id;
+
+  if (!channelId || !userId) {
+    return res.status(403).json({ message: "No tienes acceso a este canal" });
+  }
+
+  const parsedParams = markMessageReceiptParamsSchema.safeParse(req.params);
+  if (!parsedParams.success) {
+    return res.status(400).json({ message: "Parámetros inválidos" });
+  }
+
+  const parsedBody = markMessageReceiptBodySchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    return res.status(400).json({ message: "Payload inválido" });
+  }
+
+  try {
+    const receipt = await applyMessageReceiptTransition({
+      channelId,
+      messageId: parsedParams.data.messageId,
+      userId,
+      status: parsedBody.data.status
+    });
+
+    return res.status(200).json({ receipt });
+  } catch (error) {
+    if (error instanceof MessageReceiptTransitionError && error.code === "MESSAGE_NOT_FOUND") {
+      return res.status(404).json({ message: "Mensaje no encontrado" });
+    }
+
+    throw error;
+  }
 }

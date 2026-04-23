@@ -18,9 +18,25 @@ model User {
   createdChannels     Channel[]            @relation("channel_creator")
   memberships         ChannelMember[]
   messages            Message[]
+  messageReceipts     MessageReceipt[]
   presences           UserPresence[]
   typingStates        TypingState[]
   channelJoinRequests ChannelJoinRequest[]
+  refreshTokens       RefreshToken[]
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
 }
 
 model Channel {
@@ -68,19 +84,39 @@ model ChannelMember {
 }
 
 model Message {
-  id        String    @id @default(cuid())
-  channelId String
-  authorId  String
-  body      String
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  id              String    @id @default(cuid())
+  channelId       String
+  authorId        String
+  clientMessageId String?
+  body            String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
 
-  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  channel  Channel          @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  author   User             @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  receipts MessageReceipt[]
 
+  @@unique([channelId, authorId, clientMessageId])
   @@index([channelId, createdAt(sort: Desc)])
   @@index([authorId])
+}
+
+model MessageReceipt {
+  id          String    @id @default(cuid())
+  messageId   String
+  userId      String
+  deliveredAt DateTime?
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+  @@index([userId])
 }
 
 model UserPresence {

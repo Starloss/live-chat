@@ -67,23 +67,35 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/refresh` (usa refresh token en cookie HttpOnly)
+- `POST /api/auth/logout` (revoca refresh token actual y limpia cookie)
 - `GET /api/auth/me` (Bearer token)
+
+### Sesion segura (TASK-004)
+
+- Access token de corta duracion (configurable con `ACCESS_TOKEN_TTL_MINUTES`, default 15 min).
+- Refresh token rotatorio de larga duracion (configurable con `REFRESH_TOKEN_TTL_DAYS`, default 30 dias sliding).
+- Refresh token almacenado hasheado en DB para revocacion y rotacion por uso.
+- El refresh token nunca se expone a JavaScript; viaja solo en cookie HttpOnly.
 
 ## Channels endpoints (MVP)
 
 - `GET /api/channels` (Bearer token)
 - `GET /api/channels/discover?query=<text>` (Bearer token, búsqueda de canales activos)
 - `POST /api/channels` (Bearer token, body: `{ "name": "general", "visibility": "PUBLIC" | "PRIVATE" }`)
-- `POST /api/channels/:channelId/join` (Bearer token, público=join directo, privado=crea solicitud)
+- `POST /api/channels/:channelId/invitations` (Bearer token, solo OWNER en canales PRIVATE, body: `{ "username": "usuario" }` o `{ "email": "correo@dominio" }`)
+- `POST /api/channels/:channelId/invitations/accept` (Bearer token, acepta invitación pendiente en canales PRIVATE)
+- `POST /api/channels/:channelId/join` (Bearer token, público=join directo; privado=solo si existe invitación pendiente)
 - `GET /api/channels/:channelId/members` (Bearer token, requiere membresía)
-- `GET /api/channels/:channelId/requests` (Bearer token, solo OWNER)
-- `POST /api/channels/:channelId/requests/:requestId/approve` (Bearer token, solo OWNER)
-- `POST /api/channels/:channelId/requests/:requestId/deny` (Bearer token, solo OWNER)
+- `GET /api/channels/:channelId/requests` (Bearer token, solo OWNER, listado de invitaciones pendientes)
+- `POST /api/channels/:channelId/requests/:requestId/approve` (Bearer token, solo OWNER, gestión manual opcional)
+- `POST /api/channels/:channelId/requests/:requestId/deny` (Bearer token, solo OWNER, gestión manual opcional)
 
 ## Messages endpoints (MVP)
 
-- `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30` (Bearer token, requiere membresía)
+- `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30` (Bearer token, requiere membresía; incluye `viewerReceipt` por mensaje para el usuario autenticado)
 - `POST /api/channels/:channelId/messages` (Bearer token, body: `{ "body": "hola" }`, requiere membresía)
+- `POST /api/channels/:channelId/messages/:messageId/receipt` (Bearer token, body: `{ "status": "DELIVERED" | "READ" }`, requiere membresía)
 
 ## Presence endpoint (MVP)
 
@@ -96,11 +108,13 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 - Eventos cliente -> servidor:
 	- `channel:join` con `{ channelId }`
 	- `message:send` con `{ channelId, body }`
+	- `message:receipt` con `{ channelId, messageId, status: "DELIVERED" | "READ" }`
 	- `typing:start` con `{ channelId }`
 	- `typing:stop` con `{ channelId }`
 - Eventos servidor -> cliente:
 	- `channel:joined`
 	- `message:new`
+	- `message:receipt:update`
 	- `presence:update`
 	- `typing:update`
 	- `system:message`

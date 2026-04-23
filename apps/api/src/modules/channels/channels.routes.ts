@@ -4,11 +4,13 @@ import { requireChannelMembership } from "../../middlewares/channel-membership.m
 import { asyncHandler } from "../../middlewares/error.middleware";
 import { messagesRouter } from "../messages/messages.routes";
 import {
+	acceptChannelInvitation,
 	approveChannelJoinRequest,
 	createChannel,
 	denyChannelJoinRequest,
 	discoverChannels,
 	getChannelMembers,
+	inviteChannelMember,
 	joinChannel,
 	listChannelJoinRequests,
 	listChannels
@@ -20,6 +22,8 @@ channelsRouter.use(requireAuth);
 channelsRouter.get("/", asyncHandler(listChannels));
 channelsRouter.get("/discover", asyncHandler(discoverChannels));
 channelsRouter.post("/", asyncHandler(createChannel));
+channelsRouter.post("/:channelId/invitations", asyncHandler(inviteChannelMember));
+channelsRouter.post("/:channelId/invitations/accept", asyncHandler(acceptChannelInvitation));
 channelsRouter.post("/:channelId/join", asyncHandler(joinChannel));
 channelsRouter.get("/:channelId/requests", asyncHandler(listChannelJoinRequests));
 channelsRouter.post("/:channelId/requests/:requestId/approve", asyncHandler(approveChannelJoinRequest));
