@@ -1,8 +1,20 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  UIEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { io, Socket } from "socket.io-client";
 
 const API_BASE_URL = "http://localhost:4000";
 const BACKGROUND_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const CONVERSATION_LIST_REFRESH_INTERVAL_MS = 20 * 1000;
+const HISTORY_PAGE_SIZE = 30;
+const SCROLL_TOP_LOAD_THRESHOLD_PX = 60;
 
 interface UserDto {
   id: string;
@@ -15,6 +27,8 @@ interface ChannelDto {
   name: string;
   visibility: "PUBLIC" | "PRIVATE";
   role: "OWNER" | "MEMBER";
+  createdAt?: string;
+  joinedAt?: string;
 }
 
 interface DiscoveredChannelDto {
@@ -43,6 +57,7 @@ interface ChannelJoinRequestDto {
 interface MessageDto {
   id: string;
   channelId: string;
+  conversationId?: string | null;
   body: string;
   createdAt: string;
   author?: {
@@ -60,6 +75,20 @@ interface PresenceDto {
 
 interface ApiErrorResponse {
   message?: string;
+}
+
+interface SocketAckResponse {
+  ok: boolean;
+  message?: string;
+}
+
+interface ConversationListMeta {
+  conversationId: string | null;
+  lastMessageId: string | null;
+  lastMessageBody: string | null;
+  lastMessageAuthor: string | null;
+  lastMessageAt: string | null;
+  unreadCount: number;
 }
 
 class ApiHttpError extends Error {
@@ -98,6 +127,76 @@ async function apiRequest<TResponse>(
   return (await response.json().catch(() => ({}))) as TResponse;
 }
 
+function getTimestampMs(value: string | null | undefined) {
+  if (!value) {
+    return 0;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortMessagesChronologically(messages: MessageDto[]) {
+  return [...messages].sort((left, right) => {
+    const byDate = getTimestampMs(left.createdAt) - getTimestampMs(right.createdAt);
+    if (byDate !== 0) {
+      return byDate;
+    }
+
+    return left.id.localeCompare(right.id);
+  });
+}
+
+function mergeMessagesChronologically(current: MessageDto[], incoming: MessageDto[]) {
+  if (incoming.length === 0) {
+    return current;
+  }
+
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) {
+    byId.set(message.id, {
+      ...byId.get(message.id),
+      ...message
+    });
+  }
+
+  return sortMessagesChronologically(Array.from(byId.values()));
+}
+
+function getLatestMessage(messages: MessageDto[]) {
+  if (messages.length === 0) {
+    return null;
+  }
+
+  return messages.reduce((latest, candidate) => {
+    return getTimestampMs(candidate.createdAt) > getTimestampMs(latest.createdAt) ? candidate : latest;
+  });
+}
+
+function buildMessagesPath(input: {
+  channelId: string;
+  conversationId?: string | null;
+  cursor?: string | null;
+  limit: number;
+}) {
+  const query = new URLSearchParams();
+  query.set("limit", String(input.limit));
+
+  if (input.cursor) {
+    query.set("cursor", input.cursor);
+  }
+
+  if (input.conversationId) {
+    return `/api/conversations/${input.conversationId}/messages?${query.toString()}`;
+  }
+
+  return `/api/channels/${input.channelId}/messages?${query.toString()}`;
+}
+
+function getFallbackChannelActivityAt(channel: ChannelDto) {
+  return channel.joinedAt ?? channel.createdAt ?? null;
+}
+
 export function App() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [authForm, setAuthForm] = useState({
@@ -116,21 +215,106 @@ export function App() {
   const [discoveredChannels, setDiscoveredChannels] = useState<DiscoveredChannelDto[]>([]);
   const [ownerRequests, setOwnerRequests] = useState<ChannelJoinRequestDto[]>([]);
   const [messages, setMessages] = useState<MessageDto[]>([]);
+  const [messagesCursor, setMessagesCursor] = useState<string | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
   const [messageText, setMessageText] = useState("");
   const [presence, setPresence] = useState<PresenceDto[]>([]);
   const [typingUsers, setTypingUsers] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string>("");
+  const [liveAnnouncement, setLiveAnnouncement] = useState("");
+  const [conversationMetaByChannel, setConversationMetaByChannel] = useState<
+    Record<string, ConversationListMeta>
+  >({});
 
   const socketRef = useRef<Socket | null>(null);
   const tokenRef = useRef("");
   const refreshInFlightRef = useRef<Promise<string | null> | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const typingActiveRef = useRef(false);
+  const selectedChannelIdRef = useRef("");
+  const previousSelectedChannelIdRef = useRef("");
+  const activeSocketScopeRef = useRef<string | null>(null);
+  const activeChannelRequestIdRef = useRef(0);
+  const channelsRef = useRef<ChannelDto[]>([]);
+  const conversationMetaRef = useRef<Record<string, ConversationListMeta>>({});
+  const messagesListRef = useRef<HTMLUListElement | null>(null);
+  const pendingScrollRestoreRef = useRef<{ previousHeight: number; previousTop: number } | null>(null);
+  const shouldScrollToBottomRef = useRef(false);
+
+  const announceLive = useCallback((message: string) => {
+    setLiveAnnouncement((current) => (current === message ? `${message} ` : message));
+  }, []);
+
+  const syncConversationMeta = useCallback(
+    (channelId: string, updater: (previous: ConversationListMeta) => ConversationListMeta) => {
+      setConversationMetaByChannel((current) => {
+        const previous =
+          current[channelId] ??
+          ({
+            conversationId: null,
+            lastMessageId: null,
+            lastMessageBody: null,
+            lastMessageAuthor: null,
+            lastMessageAt: null,
+            unreadCount: 0
+          } satisfies ConversationListMeta);
+
+        const next = updater(previous);
+        return {
+          ...current,
+          [channelId]: next
+        };
+      });
+    },
+    []
+  );
+
+  const joinSocketScope = useCallback(
+    (channelId: string) => {
+      if (!channelId) {
+        return;
+      }
+
+      const socket = socketRef.current;
+      if (!socket || !socket.connected) {
+        return;
+      }
+
+      const previousScope = activeSocketScopeRef.current;
+      if (previousScope === channelId) {
+        return;
+      }
+
+      if (previousScope) {
+        socket.emit("channel:leave", { channelId: previousScope });
+      }
+
+      socket.emit("channel:join", { channelId }, (ack?: SocketAckResponse) => {
+        if (ack?.ok) {
+          activeSocketScopeRef.current = channelId;
+          return;
+        }
+
+        activeSocketScopeRef.current = null;
+        if (ack?.message) {
+          setErrorMessage(ack.message);
+        }
+      });
+    },
+    []
+  );
 
   const resetSessionState = useCallback(() => {
     socketRef.current?.disconnect();
     socketRef.current = null;
+    activeSocketScopeRef.current = null;
+    selectedChannelIdRef.current = "";
+    previousSelectedChannelIdRef.current = "";
+    channelsRef.current = [];
+    conversationMetaRef.current = {};
+    activeChannelRequestIdRef.current += 1;
     setConnected(false);
     setToken("");
     setUser(null);
@@ -139,9 +323,14 @@ export function App() {
     setDiscoveredChannels([]);
     setOwnerRequests([]);
     setMessages([]);
+    setMessagesCursor(null);
+    setHasOlderMessages(false);
+    setIsLoadingOlderMessages(false);
     setPresence([]);
     setTypingUsers([]);
     setMessageText("");
+    setLiveAnnouncement("");
+    setConversationMetaByChannel({});
     typingActiveRef.current = false;
 
     if (typingTimeoutRef.current) {
@@ -220,6 +409,18 @@ export function App() {
   }, [token]);
 
   useEffect(() => {
+    selectedChannelIdRef.current = selectedChannelId;
+  }, [selectedChannelId]);
+
+  useEffect(() => {
+    channelsRef.current = channels;
+  }, [channels]);
+
+  useEffect(() => {
+    conversationMetaRef.current = conversationMetaByChannel;
+  }, [conversationMetaByChannel]);
+
+  useEffect(() => {
     let isMounted = true;
 
     void (async () => {
@@ -253,6 +454,21 @@ export function App() {
     return channels.find((channel) => channel.id === selectedChannelId) ?? null;
   }, [channels, selectedChannelId]);
 
+  const sortedChannels = useMemo(() => {
+    return [...channels].sort((left, right) => {
+      const leftMeta = conversationMetaByChannel[left.id];
+      const rightMeta = conversationMetaByChannel[right.id];
+
+      const leftActivity = getTimestampMs(leftMeta?.lastMessageAt ?? getFallbackChannelActivityAt(left));
+      const rightActivity = getTimestampMs(rightMeta?.lastMessageAt ?? getFallbackChannelActivityAt(right));
+      if (leftActivity !== rightActivity) {
+        return rightActivity - leftActivity;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+  }, [channels, conversationMetaByChannel]);
+
   const isSelectedChannelOwner = selectedChannel?.role === "OWNER";
 
   useEffect(() => {
@@ -272,15 +488,43 @@ export function App() {
 
         setUser(meResponse.user);
         setChannels(channelsResponse.channels);
-        if (!selectedChannelId && channelsResponse.channels.length > 0) {
-          setSelectedChannelId(channelsResponse.channels[0].id);
-        }
+        setSelectedChannelId((current) => {
+          if (current && channelsResponse.channels.some((channel) => channel.id === current)) {
+            return current;
+          }
+
+          return channelsResponse.channels[0]?.id ?? "";
+        });
       } catch (error) {
         resetSessionState();
         setErrorMessage(error instanceof Error ? error.message : "No se pudo cargar la sesión");
       }
     })();
-  }, [token, selectedChannelId, authenticatedRequest, resetSessionState]);
+  }, [token, authenticatedRequest, resetSessionState]);
+
+  useEffect(() => {
+    if (!selectedChannelId) {
+      return;
+    }
+
+    if (channels.some((channel) => channel.id === selectedChannelId)) {
+      return;
+    }
+
+    setSelectedChannelId(channels[0]?.id ?? "");
+  }, [channels, selectedChannelId]);
+
+  useEffect(() => {
+    const activeIds = new Set(channels.map((channel) => channel.id));
+    setConversationMetaByChannel((current) => {
+      const nextEntries = Object.entries(current).filter(([channelId]) => activeIds.has(channelId));
+      if (nextEntries.length === Object.keys(current).length) {
+        return current;
+      }
+
+      return Object.fromEntries(nextEntries);
+    });
+  }, [channels]);
 
   useEffect(() => {
     if (!token) {
@@ -308,6 +552,7 @@ export function App() {
     if (!token || !user) {
       socketRef.current?.disconnect();
       socketRef.current = null;
+      activeSocketScopeRef.current = null;
       setConnected(false);
       return;
     }
@@ -320,33 +565,58 @@ export function App() {
 
     socket.on("connect", () => {
       setConnected(true);
-      if (selectedChannelId) {
-        socket.emit("channel:join", { channelId: selectedChannelId });
+      activeSocketScopeRef.current = null;
+      joinSocketScope(selectedChannelIdRef.current);
+      if (selectedChannelIdRef.current) {
+        announceLive("Reconectado al chat en tiempo real");
       }
     });
 
     socket.on("disconnect", () => {
       setConnected(false);
+      activeSocketScopeRef.current = null;
+      announceLive("Conexión de chat en tiempo real interrumpida");
+    });
+
+    socket.on("auth:expired", () => {
+      setErrorMessage("Sesión expirada");
+      resetSessionState();
     });
 
     socket.on("message:new", (incoming: MessageDto) => {
-      if (incoming.channelId !== selectedChannelId) {
+      const currentChannelId = selectedChannelIdRef.current;
+
+      syncConversationMeta(incoming.channelId, (previous) => ({
+        conversationId: incoming.conversationId ?? previous.conversationId,
+        lastMessageId: incoming.id,
+        lastMessageBody: incoming.body,
+        lastMessageAuthor: incoming.author?.username ?? incoming.authorId ?? previous.lastMessageAuthor,
+        lastMessageAt: incoming.createdAt,
+        unreadCount:
+          incoming.channelId === currentChannelId ? 0 : Math.max(0, (previous.unreadCount ?? 0) + 1)
+      }));
+
+      if (incoming.channelId !== currentChannelId) {
         return;
       }
 
-      setMessages((current) => {
-        if (current.some((message) => message.id === incoming.id)) {
-          return current;
-        }
+      const messageList = messagesListRef.current;
+      const shouldStickToBottom = messageList
+        ? messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < 80
+        : true;
 
-        return [...current, incoming];
-      });
+      if (shouldStickToBottom) {
+        shouldScrollToBottomRef.current = true;
+      }
+
+      setMessages((current) => mergeMessagesChronologically(current, [incoming]));
+      announceLive(`Nuevo mensaje de ${incoming.author?.username ?? incoming.authorId ?? "usuario"}`);
     });
 
     socket.on(
       "typing:update",
       (incoming: { channelId: string; userId: string; username: string; isTyping: boolean }) => {
-        if (incoming.channelId !== selectedChannelId || incoming.userId === user.id) {
+        if (incoming.channelId !== selectedChannelIdRef.current || incoming.userId === user.id) {
           return;
         }
 
@@ -363,7 +633,7 @@ export function App() {
     socket.on(
       "presence:update",
       (incoming: { channelId: string; userId: string; username: string; status: "online" | "offline" }) => {
-        if (incoming.channelId !== selectedChannelId) {
+        if (incoming.channelId !== selectedChannelIdRef.current) {
           return;
         }
 
@@ -385,40 +655,185 @@ export function App() {
 
     return () => {
       socket.disconnect();
-      socketRef.current = null;
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+      activeSocketScopeRef.current = null;
     };
-  }, [token, user, selectedChannelId]);
+  }, [token, user, joinSocketScope, announceLive, resetSessionState, syncConversationMeta]);
+
+  useEffect(() => {
+    if (!selectedChannelId) {
+      return;
+    }
+
+    const previousChannelId = previousSelectedChannelIdRef.current;
+    if (previousChannelId && previousChannelId !== selectedChannelId) {
+      socketRef.current?.emit("channel:leave", { channelId: previousChannelId });
+      if (typingActiveRef.current) {
+        socketRef.current?.emit("typing:stop", { channelId: previousChannelId });
+        typingActiveRef.current = false;
+      }
+    }
+
+    previousSelectedChannelIdRef.current = selectedChannelId;
+    joinSocketScope(selectedChannelId);
+
+    syncConversationMeta(selectedChannelId, (previous) => ({
+      ...previous,
+      unreadCount: 0
+    }));
+  }, [selectedChannelId, joinSocketScope, syncConversationMeta]);
 
   useEffect(() => {
     if (!token || !selectedChannelId) {
       setMessages([]);
+      setMessagesCursor(null);
+      setHasOlderMessages(false);
+      setIsLoadingOlderMessages(false);
       setPresence([]);
       setTypingUsers([]);
       return;
     }
 
+    const requestId = activeChannelRequestIdRef.current + 1;
+    activeChannelRequestIdRef.current = requestId;
+    setMessagesCursor(null);
+    setHasOlderMessages(false);
+    setIsLoadingOlderMessages(false);
+
     void (async () => {
       try {
+        const currentConversationId = conversationMetaRef.current[selectedChannelId]?.conversationId;
         const [messagesResponse, presenceResponse] = await Promise.all([
           authenticatedRequest<{ messages: MessageDto[]; nextCursor: string | null }>(
-            `/api/channels/${selectedChannelId}/messages?limit=30`
+            buildMessagesPath({
+              channelId: selectedChannelId,
+              conversationId: currentConversationId,
+              limit: HISTORY_PAGE_SIZE
+            })
           ),
           authenticatedRequest<{ users: PresenceDto[] }>(`/api/presence?channelId=${selectedChannelId}`)
         ]);
 
-        setMessages([...messagesResponse.messages].reverse());
+        if (requestId !== activeChannelRequestIdRef.current) {
+          return;
+        }
+
+        const sortedMessages = sortMessagesChronologically(messagesResponse.messages);
+        setMessages(sortedMessages);
+        setMessagesCursor(messagesResponse.nextCursor);
+        setHasOlderMessages(Boolean(messagesResponse.nextCursor));
         setPresence(presenceResponse.users);
         setTypingUsers([]);
+        shouldScrollToBottomRef.current = true;
+
+        const latestMessage = getLatestMessage(messagesResponse.messages);
+        syncConversationMeta(selectedChannelId, (previous) => ({
+          conversationId: latestMessage?.conversationId ?? previous.conversationId,
+          lastMessageId: latestMessage?.id ?? previous.lastMessageId,
+          lastMessageBody: latestMessage?.body ?? previous.lastMessageBody,
+          lastMessageAuthor:
+            latestMessage?.author?.username ?? latestMessage?.authorId ?? previous.lastMessageAuthor,
+          lastMessageAt:
+            latestMessage?.createdAt ??
+            previous.lastMessageAt ??
+            (selectedChannel ? getFallbackChannelActivityAt(selectedChannel) : null),
+          unreadCount: 0
+        }));
+
+        announceLive(`Conversación ${selectedChannel ? `#${selectedChannel.name}` : "activa"} cargada`);
 
         const socket = socketRef.current;
         if (socket?.connected) {
-          socket.emit("channel:join", { channelId: selectedChannelId });
+          joinSocketScope(selectedChannelId);
         }
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : "No se pudo cargar el canal");
       }
     })();
-  }, [token, selectedChannelId, authenticatedRequest]);
+  }, [token, selectedChannelId, selectedChannel, authenticatedRequest, joinSocketScope, syncConversationMeta, announceLive]);
+
+  useEffect(() => {
+    if (!token || channels.length === 0) {
+      return;
+    }
+
+    const refreshSnapshots = async (incrementUnread: boolean) => {
+      await Promise.all(
+        channelsRef.current.map(async (channel) => {
+          try {
+            const response = await authenticatedRequest<{ messages: MessageDto[]; nextCursor: string | null }>(
+              buildMessagesPath({ channelId: channel.id, limit: 1 })
+            );
+
+            const latestMessage = response.messages[0];
+            if (!latestMessage) {
+              syncConversationMeta(channel.id, (previous) => ({
+                ...previous,
+                lastMessageAt: previous.lastMessageAt ?? getFallbackChannelActivityAt(channel),
+                unreadCount: channel.id === selectedChannelIdRef.current ? 0 : previous.unreadCount
+              }));
+              return;
+            }
+
+            syncConversationMeta(channel.id, (previous) => {
+              const isActiveChannel = channel.id === selectedChannelIdRef.current;
+              const hasNewLatestMessage = latestMessage.id !== previous.lastMessageId;
+              const unreadCount =
+                incrementUnread && !isActiveChannel && hasNewLatestMessage
+                  ? previous.unreadCount + 1
+                  : isActiveChannel
+                    ? 0
+                    : previous.unreadCount;
+
+              return {
+                conversationId: latestMessage.conversationId ?? previous.conversationId,
+                lastMessageId: latestMessage.id,
+                lastMessageBody: latestMessage.body,
+                lastMessageAuthor:
+                  latestMessage.author?.username ?? latestMessage.authorId ?? previous.lastMessageAuthor,
+                lastMessageAt: latestMessage.createdAt,
+                unreadCount
+              };
+            });
+          } catch {
+            // Ignorar fallos de snapshot para no bloquear la experiencia principal.
+          }
+        })
+      );
+    };
+
+    void refreshSnapshots(false);
+
+    const intervalId = window.setInterval(() => {
+      void refreshSnapshots(true);
+    }, CONVERSATION_LIST_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [token, channels, authenticatedRequest, syncConversationMeta]);
+
+  useLayoutEffect(() => {
+    const listElement = messagesListRef.current;
+    if (!listElement) {
+      return;
+    }
+
+    const pendingRestore = pendingScrollRestoreRef.current;
+    if (pendingRestore) {
+      const delta = listElement.scrollHeight - pendingRestore.previousHeight;
+      listElement.scrollTop = pendingRestore.previousTop + delta;
+      pendingScrollRestoreRef.current = null;
+      return;
+    }
+
+    if (shouldScrollToBottomRef.current) {
+      listElement.scrollTop = listElement.scrollHeight;
+      shouldScrollToBottomRef.current = false;
+    }
+  }, [messages]);
 
   useEffect(() => {
     if (!token || !selectedChannelId || !isSelectedChannelOwner) {
@@ -445,10 +860,13 @@ export function App() {
 
     const response = await authenticatedRequest<{ channels: ChannelDto[] }>("/api/channels");
     setChannels(response.channels);
+    setSelectedChannelId((current) => {
+      if (current && response.channels.some((channel) => channel.id === current)) {
+        return current;
+      }
 
-    if (!selectedChannelId && response.channels.length > 0) {
-      setSelectedChannelId(response.channels[0].id);
-    }
+      return response.channels[0]?.id ?? "";
+    });
   }
 
   async function handleAuthSubmit(event: FormEvent) {
@@ -580,18 +998,21 @@ export function App() {
   if (!isSessionReady) {
     return (
       <main className="auth-container">
+        <div className="sr-only" aria-live="polite" aria-atomic="true">
+          {liveAnnouncement}
+        </div>
         <h1>Live Chat MVP</h1>
         <p className="hint">Restaurando sesión...</p>
       </main>
     );
   }
 
-  function emitTypingStop() {
-    if (!selectedChannelId || !typingActiveRef.current) {
+  function emitTypingStop(scopeChannelId = selectedChannelIdRef.current) {
+    if (!scopeChannelId || !typingActiveRef.current) {
       return;
     }
 
-    socketRef.current?.emit("typing:stop", { channelId: selectedChannelId });
+    socketRef.current?.emit("typing:stop", { channelId: scopeChannelId });
     typingActiveRef.current = false;
   }
 
@@ -639,6 +1060,7 @@ export function App() {
       "message:send",
       {
         channelId: selectedChannelId,
+        conversationId: conversationMetaRef.current[selectedChannelId]?.conversationId ?? undefined,
         body
       },
       (response: { ok: boolean; message?: string }) => {
@@ -652,28 +1074,96 @@ export function App() {
     );
   }
 
+  async function loadOlderMessages() {
+    if (!selectedChannelId || !messagesCursor || !hasOlderMessages || isLoadingOlderMessages) {
+      return;
+    }
+
+    const currentRequestId = activeChannelRequestIdRef.current;
+    setIsLoadingOlderMessages(true);
+
+    const listElement = messagesListRef.current;
+    if (listElement) {
+      pendingScrollRestoreRef.current = {
+        previousHeight: listElement.scrollHeight,
+        previousTop: listElement.scrollTop
+      };
+    }
+
+    try {
+      const response = await authenticatedRequest<{ messages: MessageDto[]; nextCursor: string | null }>(
+        buildMessagesPath({
+          channelId: selectedChannelId,
+          conversationId: conversationMetaRef.current[selectedChannelId]?.conversationId,
+          cursor: messagesCursor,
+          limit: HISTORY_PAGE_SIZE
+        })
+      );
+
+      if (currentRequestId !== activeChannelRequestIdRef.current) {
+        return;
+      }
+
+      setMessages((current) => mergeMessagesChronologically(current, response.messages));
+      setMessagesCursor(response.nextCursor);
+      setHasOlderMessages(Boolean(response.nextCursor));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "No se pudo cargar historial");
+      pendingScrollRestoreRef.current = null;
+    } finally {
+      setIsLoadingOlderMessages(false);
+    }
+  }
+
+  function handleMessagesScroll(event: UIEvent<HTMLUListElement>) {
+    if (!hasOlderMessages || isLoadingOlderMessages) {
+      return;
+    }
+
+    if (event.currentTarget.scrollTop <= SCROLL_TOP_LOAD_THRESHOLD_PX) {
+      void loadOlderMessages();
+    }
+  }
+
   if (!token || !user) {
     return (
       <main className="auth-container">
+        <div className="sr-only" aria-live="polite" aria-atomic="true">
+          {liveAnnouncement}
+        </div>
         <h1>Live Chat MVP</h1>
         <p className="hint">{mode === "login" ? "Inicia sesión" : "Crea tu cuenta"}</p>
 
         <form onSubmit={handleAuthSubmit} className="card form-grid">
           {mode === "register" ? (
-            <input
-              placeholder="username"
-              value={authForm.username}
-              onChange={(event) => setAuthForm((current) => ({ ...current, username: event.target.value }))}
-            />
+            <>
+              <label htmlFor="auth-username" className="sr-only">
+                Username
+              </label>
+              <input
+                id="auth-username"
+                placeholder="username"
+                value={authForm.username}
+                onChange={(event) => setAuthForm((current) => ({ ...current, username: event.target.value }))}
+              />
+            </>
           ) : null}
 
+          <label htmlFor="auth-email" className="sr-only">
+            Email
+          </label>
           <input
+            id="auth-email"
             type="email"
             placeholder="email"
             value={authForm.email}
             onChange={(event) => setAuthForm((current) => ({ ...current, email: event.target.value }))}
           />
+          <label htmlFor="auth-password" className="sr-only">
+            Password
+          </label>
           <input
+            id="auth-password"
             type="password"
             placeholder="password"
             value={authForm.password}
@@ -698,11 +1188,14 @@ export function App() {
 
   return (
     <main className="app-shell">
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {liveAnnouncement}
+      </div>
       <aside className="sidebar card">
         <div className="sidebar-head">
           <div>
-            <h2>Canales</h2>
-            <p className={connected ? "status online" : "status offline"}>
+            <h2>Chats</h2>
+            <p className={connected ? "status online" : "status offline"} role="status" aria-live="polite">
               {connected ? "Socket conectado" : "Socket desconectado"}
             </p>
           </div>
@@ -712,12 +1205,20 @@ export function App() {
         </div>
 
         <form onSubmit={handleCreateChannel} className="form-inline">
+          <label htmlFor="new-channel-name" className="sr-only">
+            Nombre del canal
+          </label>
           <input
+            id="new-channel-name"
             placeholder="nuevo-canal"
             value={newChannelName}
             onChange={(event) => setNewChannelName(event.target.value)}
           />
+          <label htmlFor="new-channel-visibility" className="sr-only">
+            Visibilidad del canal
+          </label>
           <select
+            id="new-channel-visibility"
             value={newChannelVisibility}
             onChange={(event) => setNewChannelVisibility(event.target.value as "PUBLIC" | "PRIVATE")}
           >
@@ -729,7 +1230,11 @@ export function App() {
 
         <div className="discover card-muted">
           <h3>Canales activos</h3>
+          <label htmlFor="discover-channel-search" className="sr-only">
+            Buscar canal
+          </label>
           <input
+            id="discover-channel-search"
             placeholder="Buscar canal por nombre"
             value={channelSearchTerm}
             onChange={(event) => setChannelSearchTerm(event.target.value)}
@@ -774,20 +1279,34 @@ export function App() {
         </div>
 
         <ul className="channel-list">
-          {channels.map((channel) => (
-            <li key={channel.id}>
-              <button
-                type="button"
-                className={channel.id === selectedChannelId ? "channel active" : "channel"}
-                onClick={() => setSelectedChannelId(channel.id)}
-              >
-                <span>#{channel.name}</span>
-                <small>
-                  {channel.role} · {channel.visibility}
-                </small>
-              </button>
-            </li>
-          ))}
+          {sortedChannels.map((channel) => {
+            const meta = conversationMetaByChannel[channel.id];
+            const messagePreview = meta?.lastMessageBody
+              ? `${meta.lastMessageAuthor ? `${meta.lastMessageAuthor}: ` : ""}${meta.lastMessageBody}`
+              : "Sin mensajes todavía";
+
+            return (
+              <li key={channel.id}>
+                <button
+                  type="button"
+                  className={channel.id === selectedChannelId ? "channel active" : "channel"}
+                  onClick={() => setSelectedChannelId(channel.id)}
+                  aria-label={`Abrir canal ${channel.name}`}
+                >
+                  <span className="channel-main">
+                    <strong>#{channel.name}</strong>
+                    <small className="channel-preview">{messagePreview}</small>
+                  </span>
+                  <span className="channel-meta">
+                    {meta?.unreadCount ? <span className="unread-badge">{meta.unreadCount}</span> : null}
+                    <small>
+                      {channel.role} · {channel.visibility}
+                    </small>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </aside>
 
@@ -806,7 +1325,20 @@ export function App() {
           </div>
         </header>
 
-        <ul className="messages">
+        {hasOlderMessages ? (
+          <div className="history-actions">
+            <button type="button" className="ghost" onClick={() => void loadOlderMessages()} disabled={isLoadingOlderMessages}>
+              {isLoadingOlderMessages ? "Cargando historial..." : "Cargar mensajes anteriores"}
+            </button>
+          </div>
+        ) : null}
+
+        <ul
+          className="messages"
+          ref={messagesListRef}
+          onScroll={handleMessagesScroll}
+          aria-label={selectedChannel ? `Mensajes de ${selectedChannel.name}` : "Mensajes"}
+        >
           {messages.map((message) => (
             <li key={message.id}>
               <strong>{message.author?.username ?? message.authorId ?? "user"}</strong>
@@ -846,9 +1378,13 @@ export function App() {
         {typingUsers.length > 0 ? <p className="hint">{typingUsers.join(", ")} está escribiendo...</p> : null}
 
         <form onSubmit={handleMessageSubmit} className="composer">
+          <label htmlFor="message-input" className="sr-only">
+            Mensaje
+          </label>
           <input
+            id="message-input"
             value={messageText}
-            onBlur={emitTypingStop}
+            onBlur={() => emitTypingStop()}
             onChange={(event) => handleMessageInput(event.target.value)}
             placeholder={selectedChannel ? "Escribe un mensaje" : "Selecciona un canal"}
             disabled={!selectedChannel}

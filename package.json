@@ -9,6 +9,7 @@
     "db:up": "docker compose up -d db",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test:api": "pnpm --filter @live-chat/api test"
+    "test:api": "pnpm --filter @live-chat/api test",
+    "test:e2e:web": "pnpm --filter @live-chat/web test:e2e"
   }
 }

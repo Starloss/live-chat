@@ -199,6 +199,27 @@ describe("TASK-003 private channels and PII", () => {
     expect(acceptMissingResponse.body).toEqual(acceptPrivateResponse.body);
   });
 
+  it("members de canal existente para no-miembro es indistinguible de canal inexistente", async () => {
+    const owner = await registerUser("owner");
+    const outsider = await registerUser("outsider");
+
+    const publicChannel = await createChannel(owner.token, "PUBLIC");
+    const missingChannelId = `missing-${uniqueToken()}`;
+
+    const existingChannelResponse = await request(app)
+      .get(`/api/channels/${publicChannel.id}/members`)
+      .set("authorization", bearerToken(outsider.token));
+
+    const missingChannelResponse = await request(app)
+      .get(`/api/channels/${missingChannelId}/members`)
+      .set("authorization", bearerToken(outsider.token));
+
+    expect(existingChannelResponse.status).toBe(404);
+    expect(missingChannelResponse.status).toBe(existingChannelResponse.status);
+    expect(existingChannelResponse.body).toEqual({ message: "Canal no encontrado" });
+    expect(missingChannelResponse.body).toEqual(existingChannelResponse.body);
+  });
+
   it("requests del owner no exponen email del usuario invitado", async () => {
     const owner = await registerUser("owner");
     const invitee = await registerUser("invitee");

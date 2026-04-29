@@ -20,7 +20,7 @@ export async function requireChannelMembership(req: Request, res: Response, next
   }
 
   if (!access.membership) {
-    return res.status(403).json({ message: "No tienes acceso a este canal" });
+    return res.status(404).json({ message: "Canal no encontrado" });
   }
 
   req.channelAccess = {

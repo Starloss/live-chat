@@ -5,5 +5,8 @@ pnpm-lock.yaml
 !.env.example
 dist
 coverage
+*.tsbuildinfo
 .vscode/*.log
 .github/reviews/
+playwright-report
+test-results

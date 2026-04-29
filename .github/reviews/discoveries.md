@@ -228,27 +228,31 @@ Method: Code review + specialist delegation
 - Severity: Medium
 - Area: Error handling / information disclosure
 - Summary: Middleware global de errores HTTP puede devolver detalles internos en respuestas 500.
-- Status: Open (cross-cutting hardening pending).
+- Status: Mitigated (respuestas 500 sanitizadas para cliente y logging interno estructurado).
 - Evidence:
   - [apps/api/src/middlewares/error.middleware.ts](apps/api/src/middlewares/error.middleware.ts)
   - [apps/api/src/modules/messages/messages.controller.ts](apps/api/src/modules/messages/messages.controller.ts)
+  - [apps/api/tests/api.smoke.test.ts](apps/api/tests/api.smoke.test.ts)
 
 ### SEC-T002-002
 - Severity: Low
 - Area: Resource enumeration signal
 - Summary: Diferenciación 404/403 en middleware de membresía puede filtrar señal de existencia de canal.
-- Status: Open (policy decision pending; currently accepted for developer UX).
+- Status: Mitigated (scope sensible estandarizado a 404 indistinguible para no revelar existencia).
 - Evidence:
   - [apps/api/src/middlewares/channel-membership.middleware.ts](apps/api/src/middlewares/channel-membership.middleware.ts)
   - [apps/api/src/modules/channels/channels.routes.ts](apps/api/src/modules/channels/channels.routes.ts)
+  - [apps/api/tests/channels.task003.test.ts](apps/api/tests/channels.task003.test.ts)
 
 ### SEC-T002-003
 - Severity: Low
 - Area: Input hardening
 - Summary: Validación de `channelId`/`messageId` en schemas de receipts es mínima (solo no vacío).
-- Status: Open (non-blocking hardening).
+- Status: Mitigated (validación estricta CUID para IDs de receipts en HTTP y socket).
 - Evidence:
   - [apps/api/src/modules/messages/message-receipt.schema.ts](apps/api/src/modules/messages/message-receipt.schema.ts)
+  - [apps/api/tests/messages.task002.test.ts](apps/api/tests/messages.task002.test.ts)
+  - [apps/api/tests/messages.socket.task002.test.ts](apps/api/tests/messages.socket.task002.test.ts)
 
 ## Execution Findings Update (2026-04-29 - Phase 0 TASK-005)
 
@@ -264,11 +268,68 @@ Method: Code review + specialist delegation
 ### QA-T007-001
 - Severity: Low
 - Area: Validation environment dependency
-- Summary: Re-ejecución de regresiones socket DB-backed depende de disponibilidad local de Docker/Postgres.
-- Status: Open (environment-dependent; non-blocking for TASK-005 closure).
+- Summary: Re-ejecución de regresiones socket DB-backed estaba condicionada por disponibilidad local de Docker/Postgres.
+- Status: Mitigated (re-runs DB-backed completados con Docker activo; suites socket en verde).
 - Evidence:
   - [apps/api/tests/messages.socket.task001.test.ts](apps/api/tests/messages.socket.task001.test.ts)
   - [apps/api/tests/messages.socket.task002.test.ts](apps/api/tests/messages.socket.task002.test.ts)
+
+### QA-T007-002
+- Severity: Low
+- Area: Frontend E2E gate
+- Summary: TASK-007 requería un E2E mínimo frontend para cerrar la matriz crítica.
+- Status: Mitigated (Playwright E2E integrado y ejecutado en verde con flujo crítico determinista).
+- Evidence:
+  - [apps/web/e2e/critical-flow.spec.ts](apps/web/e2e/critical-flow.spec.ts)
+  - [apps/web/playwright.config.ts](apps/web/playwright.config.ts)
+  - [apps/web/package.json](apps/web/package.json)
+
+## Execution Findings Update (2026-04-29 - Frontend TASK-009/010/011/012 Slices)
+
+### FE-T009-001
+- Severity: High
+- Area: Frontend realtime lifecycle
+- Summary: Conexión socket se recreaba en cambios de canal.
+- Status: Mitigated in slice (una conexión por sesión y join/leave por scope implementado).
+- Evidence:
+  - [apps/web/src/App.tsx](apps/web/src/App.tsx)
+
+### FE-T010-001
+- Severity: Medium
+- Area: Conversation list parity
+- Summary: Faltaban preview de último mensaje, contador de no leídos y orden por actividad.
+- Status: In Progress (primitivas implementadas con estrategia de snapshot periódico; queda afinado de precisión en no leídos).
+- Evidence:
+  - [apps/web/src/App.tsx](apps/web/src/App.tsx)
+  - [apps/web/src/styles.css](apps/web/src/styles.css)
+
+### FE-T011-001
+- Severity: Medium
+- Area: Timeline pagination
+- Summary: El cursor del API no estaba integrado en UI para historial incremental.
+- Status: In Progress (load-more por cursor y merge sin duplicados implementado; falta cobertura automatizada adicional).
+- Evidence:
+  - [apps/web/src/App.tsx](apps/web/src/App.tsx)
+
+### FE-T012-001
+- Severity: Medium
+- Area: Accessibility
+- Summary: Faltaban labels explícitos, foco visible consistente y región aria-live para actualizaciones dinámicas.
+- Status: In Progress (mejoras base aplicadas; pendiente corrida de escáner a11y automatizado).
+- Evidence:
+  - [apps/web/src/App.tsx](apps/web/src/App.tsx)
+  - [apps/web/src/styles.css](apps/web/src/styles.css)
+
+## Execution Findings Update (2026-04-29 - Residual Security/Operations)
+
+### SEC-T013-001
+- Severity: Medium
+- Area: Dependency hardening
+- Summary: `pnpm audit --prod` reporta vulnerabilidades transitorias altas (socket.io-parser/path-to-regexp/effect/defu) que requieren ola de actualización coordinada.
+- Status: Open (mitigación pendiente por upgrade de dependencias y revalidación completa).
+- Evidence:
+  - [apps/api/package.json](apps/api/package.json)
+  - [pnpm-lock.yaml](pnpm-lock.yaml)
 
 ## Execution Findings Update (2026-04-29 - Phase 1 TASK-008 M1)
 
@@ -284,8 +345,11 @@ Method: Code review + specialist delegation
 ### QA-T008-001
 - Severity: Medium
 - Area: Validation completeness
-- Summary: Validación runtime DB-backed de `prisma migrate deploy` y regresión de mensajes para M1 no pudo completarse por indisponibilidad local de Docker/Postgres.
-- Status: Open (blocked by environment).
+- Summary: Validación runtime DB-backed de `prisma migrate deploy` y regresión de mensajes para M1 se completó en entorno local con Docker/Postgres disponible.
+- Status: Mitigated (migración aplicada y suites críticas DB-backed en verde).
 - Evidence:
   - [apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql](apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql)
   - [apps/api/tests/messages.task001.test.ts](apps/api/tests/messages.task001.test.ts)
+  - [apps/api/tests/messages.socket.task001.test.ts](apps/api/tests/messages.socket.task001.test.ts)
+  - [apps/api/tests/messages.task002.test.ts](apps/api/tests/messages.task002.test.ts)
+  - [apps/api/tests/messages.socket.task002.test.ts](apps/api/tests/messages.socket.task002.test.ts)

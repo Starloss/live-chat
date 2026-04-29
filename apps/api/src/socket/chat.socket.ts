@@ -9,6 +9,7 @@ import {
   applyMessageReceiptTransition,
   MessageReceiptTransitionError
 } from "../modules/messages/message-receipts";
+import { resolveMessageScopeForUser } from "../modules/messages/message-scope";
 import { messageSendPayloadSchema } from "../modules/messages/message-send.schema";
 import {
   SocketEventRateLimiter,
@@ -62,10 +63,37 @@ const INTERNAL_ERROR_MESSAGE = "Ocurrió un error interno";
 
 const socketEventRateLimiter = new SocketEventRateLimiter(SOCKET_EVENT_RATE_LIMITS);
 
-const activeConnectionsByUser = new Map<string, number>();
-
 function getChannelRoom(channelId: string) {
   return `channel:${channelId}`;
+}
+
+function getUserConnectionRoom(userId: string) {
+  return `user:${userId}:connections`;
+}
+
+async function countActiveConnectionsForUser(chat: ReturnType<Server["of"]>, userId: string) {
+  const connectedSockets = await chat.in(getUserConnectionRoom(userId)).allSockets();
+  return connectedSockets.size;
+}
+
+function getSocketSyncErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return "unknown_error";
+}
+
+function logPresenceSyncFailure(event: string, userId: string, error: unknown) {
+  console.error(
+    JSON.stringify({
+      level: "error",
+      event,
+      userId,
+      error: getSocketSyncErrorMessage(error),
+      timestamp: new Date().toISOString()
+    })
+  );
 }
 
 function normalizeIdentity(value: string | null | undefined) {
@@ -297,13 +325,18 @@ export function registerChatSocket(io: Server) {
     }, msUntilTokenExpiry);
     tokenExpiryTimer.unref?.();
 
-    const currentConnections = activeConnectionsByUser.get(user.id) ?? 0;
-    const nextConnections = currentConnections + 1;
-    activeConnectionsByUser.set(user.id, nextConnections);
+    void (async () => {
+      try {
+        await Promise.resolve(socket.join(getUserConnectionRoom(user.id)));
 
-    if (nextConnections === 1) {
-      void setPresenceOnline(chat, user);
-    }
+        const activeConnections = await countActiveConnectionsForUser(chat, user.id);
+        if (activeConnections === 1) {
+          await setPresenceOnline(chat, user);
+        }
+      } catch (error) {
+        logPresenceSyncFailure("socket.presence_online_sync_failed", user.id, error);
+      }
+    })();
 
     socket.emit("system:message", "Conectado al namespace /chat");
 
@@ -351,15 +384,31 @@ export function registerChatSocket(io: Server) {
         return;
       }
 
-      const { channelId, body, clientMessageId } = parsed.data;
-      const canAccess = await userCanAccessChannel(user.id, channelId);
-      if (!canAccess) {
+      const { channelId, conversationId, body, clientMessageId } = parsed.data;
+      const resolvedScope = await resolveMessageScopeForUser({
+        userId: user.id,
+        channelId,
+        conversationId
+      });
+
+      if (!resolvedScope.ok) {
+        if (
+          resolvedScope.code === "MISSING_SCOPE" ||
+          resolvedScope.code === "UNSUPPORTED_CONVERSATION"
+        ) {
+          ack?.({ ok: false, code: "BAD_PAYLOAD", message: "Payload inválido" });
+          return;
+        }
+
         ack?.({ ok: false, code: "FORBIDDEN", message: "No tienes acceso a este canal" });
         return;
       }
 
+      const resolvedChannelId = resolvedScope.value.channelId;
+
       const { message, deduplicated } = await createChannelMessageIdempotent({
-        channelId,
+        channelId: resolvedChannelId,
+        conversationId: resolvedScope.value.conversationId,
         authorId: user.id,
         body,
         clientMessageId
@@ -368,6 +417,7 @@ export function registerChatSocket(io: Server) {
       const payload = {
         id: message.id,
         channelId: message.channelId,
+        conversationId: message.conversationId,
         body: message.body,
         createdAt: message.createdAt,
         clientMessageId: clientMessageId ?? null,
@@ -378,7 +428,7 @@ export function registerChatSocket(io: Server) {
         }
       };
 
-      chat.to(getChannelRoom(channelId)).emit("message:new", payload);
+      chat.to(getChannelRoom(resolvedChannelId)).emit("message:new", payload);
 
       ack?.({ ok: true, data: payload });
     });
@@ -540,16 +590,16 @@ export function registerChatSocket(io: Server) {
     socket.on("disconnect", () => {
       clearTimeout(tokenExpiryTimer);
 
-      const current = activeConnectionsByUser.get(user.id) ?? 1;
-      const next = Math.max(0, current - 1);
-
-      if (next === 0) {
-        activeConnectionsByUser.delete(user.id);
-        void setPresenceOffline(chat, user);
-        return;
-      }
-
-      activeConnectionsByUser.set(user.id, next);
+      void (async () => {
+        try {
+          const activeConnections = await countActiveConnectionsForUser(chat, user.id);
+          if (activeConnections === 0) {
+            await setPresenceOffline(chat, user);
+          }
+        } catch (error) {
+          logPresenceSyncFailure("socket.presence_offline_sync_failed", user.id, error);
+        }
+      })();
     });
   });
 }

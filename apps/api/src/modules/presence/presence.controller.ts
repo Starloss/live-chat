@@ -30,7 +30,7 @@ export async function listPresenceByChannel(req: Request, res: Response) {
   }
 
   if (!access.membership) {
-    return res.status(403).json({ message: "No tienes acceso a este canal" });
+    return res.status(404).json({ message: "Canal no encontrado" });
   }
 
   const members = await prisma.channelMember.findMany({

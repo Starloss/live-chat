@@ -16,6 +16,23 @@ function parsePositiveInteger(value: string | undefined, fallback: number, varia
   return parsed;
 }
 
+function parseBoolean(value: string | undefined, fallback: boolean, variableName: string) {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes") {
+    return true;
+  }
+
+  if (normalized === "false" || normalized === "0" || normalized === "no") {
+    return false;
+  }
+
+  throw new Error(`${variableName} debe ser booleano (true/false)`);
+}
+
 const port = parsePositiveInteger(process.env.PORT, 4000, "PORT");
 const accessTokenTtlMinutes = parsePositiveInteger(
   process.env.ACCESS_TOKEN_TTL_MINUTES,
@@ -26,6 +43,13 @@ const refreshTokenTtlDays = parsePositiveInteger(
   process.env.REFRESH_TOKEN_TTL_DAYS,
   30,
   "REFRESH_TOKEN_TTL_DAYS"
+);
+const redisEnabled = parseBoolean(process.env.REDIS_ENABLED, false, "REDIS_ENABLED");
+const redisUrl = process.env.REDIS_URL?.trim() || "redis://localhost:6379";
+const conversationFirstDualWriteEnabled = parseBoolean(
+  process.env.CONVERSATION_FIRST_DUAL_WRITE_ENABLED,
+  true,
+  "CONVERSATION_FIRST_DUAL_WRITE_ENABLED"
 );
 
 const refreshTokenCookieName = process.env.REFRESH_TOKEN_COOKIE_NAME?.trim() || "live_chat_rt";
@@ -58,6 +82,9 @@ export const env = {
   jwtSecret: resolvedJwtSecret,
   port,
   webOrigin: process.env.WEB_ORIGIN ?? "http://localhost:5173",
+  redisEnabled,
+  redisUrl,
+  conversationFirstDualWriteEnabled,
   accessTokenTtlMinutes,
   refreshTokenTtlDays,
   refreshTokenCookieName,

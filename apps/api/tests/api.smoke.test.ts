@@ -1,6 +1,8 @@
+import express from "express";
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app";
+import { errorHandler, notFoundHandler } from "../src/middlewares/error.middleware";
 
 describe("API smoke", () => {
   const app = createApp();
@@ -34,5 +36,35 @@ describe("API smoke", () => {
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({ message: "Ruta no encontrada" });
+  });
+
+  it("sanitiza errores 500 y mantiene logging interno estructurado", async () => {
+    const secureApp = express();
+    secureApp.get("/boom", (_req, _res, next) => {
+      next(new Error("detalle interno sensible"));
+    });
+    secureApp.use(notFoundHandler);
+    secureApp.use(errorHandler);
+
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const response = await request(secureApp).get("/boom");
+
+      expect(response.status).toBe(500);
+      expect(response.body).toEqual({ message: "Error interno del servidor" });
+
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+      const loggedEntry = consoleErrorSpy.mock.calls[0]?.[0];
+      expect(typeof loggedEntry).toBe("string");
+
+      const parsedLog = JSON.parse(loggedEntry as string) as Record<string, unknown>;
+      expect(parsedLog.event).toBe("http.request.error");
+      expect(parsedLog.status).toBe(500);
+      expect(parsedLog.message).toBe("detalle interno sensible");
+      expect(parsedLog).toHaveProperty("stack");
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
   });
 });

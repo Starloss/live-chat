@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma";
 const persistedMessageSelect = {
   id: true,
   channelId: true,
+  conversationId: true,
   authorId: true,
   body: true,
   createdAt: true,
@@ -23,6 +24,7 @@ type MessagePersistenceClient = Pick<typeof prisma, "message">;
 
 interface CreateChannelMessageInput {
   channelId: string;
+  conversationId?: string | null;
   authorId: string;
   body: string;
   clientMessageId?: string | null;
@@ -45,6 +47,7 @@ async function createMessageWithClientMessageId(
     const message = await client.message.create({
       data: {
         channelId: input.channelId,
+        conversationId: input.conversationId ?? undefined,
         authorId: input.authorId,
         body: input.body,
         clientMessageId: input.clientMessageId
@@ -93,6 +96,7 @@ export async function createChannelMessageIdempotent(
     const message = await client.message.create({
       data: {
         channelId: input.channelId,
+        conversationId: input.conversationId ?? undefined,
         authorId: input.authorId,
         body: input.body
       },
@@ -108,6 +112,7 @@ export async function createChannelMessageIdempotent(
   return createMessageWithClientMessageId(
     {
       channelId: input.channelId,
+      conversationId: input.conversationId ?? undefined,
       authorId: input.authorId,
       body: input.body,
       clientMessageId

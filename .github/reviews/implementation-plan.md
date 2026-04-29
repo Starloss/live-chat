@@ -7,7 +7,7 @@
 - Mode: Orchestration
 - Approval Status: Approved (Phase 0 + Phase 1 kickoff)
 - Approved By: Product Owner (Usuario) - 2026-04-22
-- Execution Scope: Phase 1 (TASK-008 M1 implemented; DB-backed validation pending)
+- Execution Scope: Phase 1-3 active slices (TASK-007 completed; TASK-006/008/009/010/011/012/013 in progress)
 
 ## Traceability Matrix
 | Finding ID | Summary | Severity | Planned Task IDs |
@@ -43,14 +43,14 @@
 | TASK-003 | Invitation-only private channels + PII minimization | Phase 0 | P0 | Senior Backend Specialist + Cybersecurity Specialist | 2-3 days | None | Completed (runtime validation passed locally) |
 | TASK-004 | Session hardening (short access + rotating refresh) | Phase 0 | P0 | Senior Backend Specialist + Cybersecurity Specialist + Senior Frontend Specialist | 4-6 days | None | Completed (runtime validation passed locally) |
 | TASK-005 | Socket anti-abuse controls | Phase 0 | P0 | Senior Backend Specialist + Cybersecurity Specialist | 2-3 days | None | Completed (unit + burst/flood integration validation passed) |
-| TASK-006 | Distributed realtime state (Redis adapter) | Phase 1 | P1 | Senior Backend Specialist | 2-4 days | TASK-005 | Not Started |
-| TASK-007 | Critical test matrix (API + socket + E2E) | Phase 0 | P0 | QA Specialist | 3-5 days | TASK-003, TASK-004, TASK-005 | In Progress (backend suites + flood coverage green; E2E and DB-backed socket rerun pending) |
-| TASK-008 | Conversation/DM domain model (mandatory) | Phase 1 | P0 | Senior Backend Specialist | 5-8 days | TASK-001, TASK-002 | In Progress (M1 schema/migration/backfill complete; DB-backed migration verification pending) |
-| TASK-009 | Stable socket lifecycle in UI | Phase 1 | P1 | Senior Frontend Specialist | 1-2 days | TASK-004 | Not Started |
-| TASK-010 | Conversation list parity features | Phase 2 | P1 | Senior Frontend Specialist | 3-4 days | TASK-008, TASK-009 | Not Started |
-| TASK-011 | Infinite history with cursor sync | Phase 2 | P2 | Senior Frontend Specialist + Senior Backend Specialist | 2-3 days | TASK-001, TASK-009 | Not Started |
-| TASK-012 | Accessibility remediation (forms/live updates) | Phase 2 | P2 | Senior Frontend Specialist + QA Specialist | 1-2 days | TASK-010 | Not Started |
-| TASK-013 | Readiness endpoint and observability baseline | Phase 3 | P2 | Senior Backend Specialist + QA Specialist | 1-2 days | TASK-006 | Not Started |
+| TASK-006 | Distributed realtime state (Redis adapter) | Phase 1 | P1 | Senior Backend Specialist | 2-4 days | TASK-005 | In Progress (Slice 1: Redis adapter env-driven + single-instance fallback + distributed presence connection room counting) |
+| TASK-007 | Critical test matrix (API + socket + E2E) | Phase 0 | P0 | QA Specialist | 3-5 days | TASK-003, TASK-004, TASK-005 | Completed (DB-backed API/socket rerun + flood regression + full API sweep + minimal frontend E2E green) |
+| TASK-008 | Conversation/DM domain model (mandatory) | Phase 1 | P0 | Senior Backend Specialist | 5-8 days | TASK-001, TASK-002 | In Progress (M1 validated + M2 conversation-first dual-write/read implemented; M3 DIRECT flow + wider socket parity pending) |
+| TASK-009 | Stable socket lifecycle in UI | Phase 1 | P1 | Senior Frontend Specialist | 1-2 days | TASK-004 | In Progress (single socket/session lifecycle implemented; backend `channel:leave` explicit ACK parity pending) |
+| TASK-010 | Conversation list parity features | Phase 2 | P1 | Senior Frontend Specialist | 3-4 days | TASK-008, TASK-009 | In Progress (last-message preview + unread counters + activity sorting implemented with periodic snapshot strategy) |
+| TASK-011 | Infinite history with cursor sync | Phase 2 | P2 | Senior Frontend Specialist + Senior Backend Specialist | 2-3 days | TASK-001, TASK-009 | In Progress (cursor-based load-more + duplicate-safe merge + chronological ordering implemented; regression automation pending) |
+| TASK-012 | Accessibility remediation (forms/live updates) | Phase 2 | P2 | Senior Frontend Specialist + QA Specialist | 1-2 days | TASK-010 | In Progress (explicit labels + keyboard focus styles + aria-live announcements implemented; automated a11y scan pending) |
+| TASK-013 | Readiness endpoint and observability baseline | Phase 3 | P2 | Senior Backend Specialist + QA Specialist | 1-2 days | TASK-006 | In Progress (Slice 1: /readyz DB+Redis checks, /health preserved, structured readiness failure logs) |
 
 ## Task Details
 ### TASK-001 - Message idempotency and dedupe
@@ -184,12 +184,11 @@
 - Exit Criteria: Health signals reflect dependency state and support release gating.
 
 ## Risks and Blockers
-- Phase 0 completion gate is partially open: TASK-007 still requires E2E minimum y rerun DB-backed de regresión socket en entorno con Docker/Postgres.
-- Residual cross-cutting security risk: HTTP 500 responses may expose internal error details via global error middleware; follow-up hardening required before release gate.
 - Distributed hardening gap: socket event rate limiting remains process-local (single-instance effective, multi-instance bypass risk) until TASK-006.
 - Product policy override risk: TASK-008 starts with locked defaults; any post-kickoff change request may force migration/API adjustments.
-- Infra residual risk for TASK-007: DB-backed socket regression rerun is environment-dependent when Docker/Postgres is unavailable locally.
-- TASK-008 M1 validation blocker: local Docker/Postgres unavailable prevented `prisma migrate deploy` runtime verification and DB-backed regression proof.
+- Operational dependency risk: DB-backed validations remain dependent on Docker/Postgres availability in local and CI environments.
+- Frontend-backend parity risk: UI emits `channel:leave` best-effort while backend ACK parity for explicit leave semantics remains limited.
+- Supply-chain residual risk: `pnpm audit --prod` reports high-severity transitive vulnerabilities requiring coordinated dependency upgrade wave.
 
 ## Decisions Needed
 - None pending for TASK-008 kickoff. Locked defaults:
@@ -266,6 +265,24 @@
 - 2026-04-29 - Senior Backend Specialist - TASK-008 M1 kickoff implement
 	- Implemented additive Conversation/ConversationParticipant model, M1 migration with CHANNEL wrapper backfill and sync triggers, and legacy-compat smoke assertion for message->conversation linkage.
 	- Evidence: [apps/api/prisma/schema.prisma](apps/api/prisma/schema.prisma), [apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql](apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql), [apps/api/tests/messages.task001.test.ts](apps/api/tests/messages.task001.test.ts).
+- 2026-04-29 - QA Specialist - TASK-007/TASK-008 M1 DB-backed validation
+	- Recovered Docker dependency, applied `prisma migrate deploy` for M1, re-ran critical DB-backed TASK-001/TASK-002 API+socket suites plus TASK-005 flood regression, and executed full API test sweep (39/39 passing).
+	- Evidence: [apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql](apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql), [apps/api/tests/messages.task001.test.ts](apps/api/tests/messages.task001.test.ts), [apps/api/tests/messages.socket.task001.test.ts](apps/api/tests/messages.socket.task001.test.ts), [apps/api/tests/messages.task002.test.ts](apps/api/tests/messages.task002.test.ts), [apps/api/tests/messages.socket.task002.test.ts](apps/api/tests/messages.socket.task002.test.ts), [apps/api/tests/socket.task005.flood.test.ts](apps/api/tests/socket.task005.flood.test.ts).
+- 2026-04-29 - Senior Backend Specialist - TASK-006/TASK-013 slice implement
+	- Added env-driven Socket.IO Redis adapter bootstrap with safe fallback to single-instance mode, shifted socket presence connection tracking to per-user rooms for distributed awareness, and introduced readiness baseline with `GET /readyz` (DB + Redis checks), preserving `GET /health` liveness.
+	- Evidence: [apps/api/src/socket/socket-redis-adapter.ts](apps/api/src/socket/socket-redis-adapter.ts), [apps/api/src/socket/chat.socket.ts](apps/api/src/socket/chat.socket.ts), [apps/api/src/observability/readiness.ts](apps/api/src/observability/readiness.ts), [apps/api/src/app.ts](apps/api/src/app.ts), [apps/api/src/index.ts](apps/api/src/index.ts), [apps/api/tests/readiness.task013.test.ts](apps/api/tests/readiness.task013.test.ts), [docker-compose.yml](docker-compose.yml).
+- 2026-04-29 - Senior Backend Specialist - TASK-008 M2 implement
+	- Implemented conversation-first dual-write/read for message flows (HTTP + socket) with legacy `channelId` compatibility, new conversation message routes, rollout guard, and integration coverage.
+	- Evidence: [apps/api/src/modules/messages/message-scope.ts](apps/api/src/modules/messages/message-scope.ts), [apps/api/src/modules/messages/messages.controller.ts](apps/api/src/modules/messages/messages.controller.ts), [apps/api/src/modules/messages/conversation-messages.routes.ts](apps/api/src/modules/messages/conversation-messages.routes.ts), [apps/api/src/socket/chat.socket.ts](apps/api/src/socket/chat.socket.ts), [apps/api/tests/messages.task008.m2.test.ts](apps/api/tests/messages.task008.m2.test.ts), [apps/api/tests/messages.socket.task008.m2.test.ts](apps/api/tests/messages.socket.task008.m2.test.ts).
+- 2026-04-29 - Senior Frontend Specialist - TASK-009/010/011/012 implement slice
+	- Refactored UI to single socket/session lifecycle with room join/leave scope control, introduced conversation list parity metadata (preview/unread/activity order), added cursor-based history loading with dedupe merge, and applied accessibility improvements (labels, focus-visible, aria-live).
+	- Evidence: [apps/web/src/App.tsx](apps/web/src/App.tsx), [apps/web/src/styles.css](apps/web/src/styles.css).
+- 2026-04-29 - QA Specialist - TASK-007 minimal frontend E2E gate
+	- Integrated Playwright E2E baseline and validated critical frontend flow deterministically, adding scripts and docs for repeatable execution.
+	- Evidence: [apps/web/e2e/critical-flow.spec.ts](apps/web/e2e/critical-flow.spec.ts), [apps/web/playwright.config.ts](apps/web/playwright.config.ts), [apps/web/package.json](apps/web/package.json), [package.json](package.json), [README.md](README.md).
+- 2026-04-29 - Cybersecurity Specialist - SEC-T002 hardening wave
+	- Sanitized HTTP 500 client responses with structured internal logging, standardized privacy-sensitive membership/scope denials to indistinguishable 404, and hardened receipts ID schema validation with updated tests.
+	- Evidence: [apps/api/src/middlewares/error.middleware.ts](apps/api/src/middlewares/error.middleware.ts), [apps/api/src/middlewares/channel-membership.middleware.ts](apps/api/src/middlewares/channel-membership.middleware.ts), [apps/api/src/modules/messages/message-receipt.schema.ts](apps/api/src/modules/messages/message-receipt.schema.ts), [apps/api/tests/api.smoke.test.ts](apps/api/tests/api.smoke.test.ts), [apps/api/tests/messages.task002.test.ts](apps/api/tests/messages.task002.test.ts), [apps/api/tests/messages.socket.task002.test.ts](apps/api/tests/messages.socket.task002.test.ts).
 
 ## Change Log
 - 2026-04-22: Initial plan generated from specialist discovery findings.
@@ -288,3 +305,9 @@
 - 2026-04-29: TASK-005 load/flood validation evidence captured via integration suite; TASK-005 promoted to Completed.
 - 2026-04-29: Next active milestone set to TASK-008 M1 kickoff (schema/backfill + dual-path start).
 - 2026-04-29: TASK-008 M1 implemented (schema + migration + backfill + sync triggers); pending DB-backed migration verification.
+- 2026-04-29: Docker dependency recovered; `prisma migrate deploy` and critical DB-backed regression suites passed, closing TASK-008 M1 runtime-validation blocker and narrowing TASK-007 pending scope to minimal frontend E2E.
+- 2026-04-29: TASK-006/TASK-013 started with backend operability slice (Redis adapter fallback + distributed presence connection room counting + readiness endpoint baseline + structured failure logs).
+- 2026-04-29: TASK-008 advanced to M2 with conversation-first dual-write/read implementation and dedicated HTTP/socket integration coverage.
+- 2026-04-29: Frontend TASK-009/010/011/012 moved from Not Started to In Progress with stable socket lifecycle, conversation list parity primitives, cursor history loading, and baseline accessibility improvements.
+- 2026-04-29: TASK-007 promoted to Completed after adding and executing minimal frontend E2E (Playwright) in green.
+- 2026-04-29: SEC-T002-001/002/003 hardening implemented and validated; cross-cutting security follow-ups narrowed to dependency upgrade wave.

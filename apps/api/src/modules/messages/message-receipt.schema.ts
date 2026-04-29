@@ -2,17 +2,20 @@ import { z } from "zod";
 
 export const messageReceiptStatusSchema = z.enum(["DELIVERED", "READ"]);
 
+const cuidIdSchema = z.string().trim().cuid();
+
 export const markMessageReceiptBodySchema = z.object({
   status: messageReceiptStatusSchema
 });
 
 export const markMessageReceiptParamsSchema = z.object({
-  messageId: z.string().trim().min(1)
+  channelId: cuidIdSchema,
+  messageId: cuidIdSchema
 });
 
 export const messageReceiptSocketPayloadSchema = z.object({
-  channelId: z.string().trim().min(1),
-  messageId: z.string().trim().min(1),
+  channelId: cuidIdSchema,
+  messageId: cuidIdSchema,
   status: messageReceiptStatusSchema
 });
 

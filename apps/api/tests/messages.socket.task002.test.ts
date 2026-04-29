@@ -400,6 +400,24 @@ describe("TASK-002 socket delivery/read receipts", () => {
     trackedSockets.delete(socket);
   });
 
+  it("retorna BAD_PAYLOAD cuando channelId/messageId no tienen formato válido", async () => {
+    const member = await registerUser("task002-socket-badid");
+    const socket = await connectChatSocket(member.token);
+
+    const ack = await emitWithAck(socket, "message:receipt", {
+      channelId: "canal-invalido",
+      messageId: "mensaje-invalido",
+      status: "READ"
+    });
+
+    expect(ack.ok).toBe(false);
+    expect(ack.code).toBe("BAD_PAYLOAD");
+    expect(ack.message).toBe("Payload inválido");
+
+    socket.disconnect();
+    trackedSockets.delete(socket);
+  });
+
   it("retorna RATE_LIMITED en message:receipt al superar la cuota", async () => {
     const member = await registerUser("task002-socket-ratelimit");
     const socket = await connectChatSocket(member.token);

@@ -32,6 +32,12 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 	pnpm db:up
 	```
 
+	- Opcional (TASK-006): para estado realtime distribuido, levantar tambien Redis:
+
+	```bash
+	docker compose up -d redis
+	```
+
 4. Ejecutar Prisma:
 
 	```bash
@@ -51,6 +57,15 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 	pnpm test:api
 	```
 
+Ejecutar E2E mínimo del frontend (TASK-007):
+
+	```bash
+	pnpm --filter @live-chat/web exec playwright install chromium
+	pnpm test:e2e:web
+	```
+
+	- El escenario E2E usa mocks controlados del API desde Playwright para evitar dependencia de DB/servicios externos.
+
 8. CI en GitHub:
 
 	- Workflow en `.github/workflows/ci.yml`.
@@ -62,6 +77,12 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 - Web: http://localhost:5173
 - API: http://localhost:4000
 - PostgreSQL (Docker): localhost:5433
+- Redis (Docker, opcional): localhost:6379
+
+## Operabilidad
+
+- `GET /health`: liveness simple del proceso (no verifica dependencias).
+- `GET /readyz`: readiness real para gating (verifica DB y Redis cuando `REDIS_ENABLED=true`).
 
 ## Auth endpoints (MVP)
 
@@ -94,8 +115,11 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 ## Messages endpoints (MVP)
 
 - `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30` (Bearer token, requiere membresía; incluye `viewerReceipt` por mensaje para el usuario autenticado)
-- `POST /api/channels/:channelId/messages` (Bearer token, body: `{ "body": "hola" }`, requiere membresía)
+- `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30&conversationId=<conversationId>` (Bearer token, requiere membresía; `conversationId` opcional para lectura conversation-aware)
+- `POST /api/channels/:channelId/messages` (Bearer token, body: `{ "body": "hola", "conversationId"?: "..." }`, requiere membresía)
 - `POST /api/channels/:channelId/messages/:messageId/receipt` (Bearer token, body: `{ "status": "DELIVERED" | "READ" }`, requiere membresía)
+- `GET /api/conversations/:conversationId/messages?cursor=<messageId>&limit=30` (Bearer token, scope por conversación)
+- `POST /api/conversations/:conversationId/messages` (Bearer token, body: `{ "body": "hola" }`, scope por conversación)
 
 ## Presence endpoint (MVP)
 
@@ -107,7 +131,7 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 - Auth en handshake: `auth: { token: <JWT> }`
 - Eventos cliente -> servidor:
 	- `channel:join` con `{ channelId }`
-	- `message:send` con `{ channelId, body }`
+	- `message:send` con `{ channelId?, conversationId?, body }` (requiere al menos uno de `channelId` o `conversationId`)
 	- `message:receipt` con `{ channelId, messageId, status: "DELIVERED" | "READ" }`
 	- `typing:start` con `{ channelId }`
 	- `typing:stop` con `{ channelId }`
@@ -124,6 +148,7 @@ Monorepo base para un Realtime Chat orientado a entrevistas.
 - Rate limiting en `/api` y límites más estrictos en `/api/auth`.
 - Manejo global uniforme de errores (`404` y `500` JSON).
 - Wrappers async en rutas para capturar excepciones de controladores.
+- Rollout TASK-008 M2 controlado por `CONVERSATION_FIRST_DUAL_WRITE_ENABLED` (default `true`).
 
 ## Siguiente paso sugerido
 

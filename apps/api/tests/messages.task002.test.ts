@@ -290,6 +290,24 @@ describe("TASK-002 message delivery/read receipts", () => {
     expect(response.body).toEqual({ message: "Payload inválido" });
   });
 
+  it("retorna 400 cuando messageId no cumple formato esperado", async () => {
+    const author = await registerUser("task002badid-author");
+    const viewer = await registerUser("task002badid-viewer");
+    const channelId = await createChannel(author.token);
+
+    await joinChannel(viewer.token, channelId);
+
+    const response = await request(app)
+      .post(`/api/channels/${channelId}/messages/message-id-invalido/receipt`)
+      .set("authorization", bearerToken(viewer.token))
+      .send({
+        status: "READ"
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ message: "Parámetros inválidos" });
+  });
+
   it("retorna 401 cuando falta autenticación en endpoint de receipt", async () => {
     const author = await registerUser("task002noauth-author");
     const channelId = await createChannel(author.token);
@@ -368,7 +386,7 @@ describe("TASK-002 message delivery/read receipts", () => {
     expect(viewerAMessage?.viewerReceipt?.userId).toBe(viewerA.user.id);
   });
 
-  it("requiere membresia del canal para marcar receipts", async () => {
+  it("usa 404 indistinguible cuando el usuario no pertenece al canal en receipts", async () => {
     const author = await registerUser("task002forbid-author");
     const outsider = await registerUser("task002forbid-outsider");
     const channelId = await createChannel(author.token);
@@ -389,8 +407,8 @@ describe("TASK-002 message delivery/read receipts", () => {
       status: "DELIVERED"
     });
 
-    expect(response.status).toBe(403);
-    expect(response.body).toEqual({ message: "No tienes acceso a este canal" });
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ message: "Canal no encontrado" });
   });
 
   it("retorna 404 cuando el mensaje no pertenece al canal indicado", async () => {
