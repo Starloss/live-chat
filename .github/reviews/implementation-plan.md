@@ -7,7 +7,7 @@
 - Mode: Orchestration
 - Approval Status: Approved (Phase 0 + Phase 1 kickoff)
 - Approved By: Product Owner (Usuario) - 2026-04-22
-- Execution Scope: Phase 1 (TASK-008 ready for implementation under locked defaults)
+- Execution Scope: Phase 1 (TASK-008 M1 implemented; DB-backed validation pending)
 
 ## Traceability Matrix
 | Finding ID | Summary | Severity | Planned Task IDs |
@@ -42,10 +42,10 @@
 | TASK-002 | Delivery and read receipts | Phase 1 | P0 | Senior Backend Specialist | 3-5 days | TASK-001 | Completed (runtime validation passed locally) |
 | TASK-003 | Invitation-only private channels + PII minimization | Phase 0 | P0 | Senior Backend Specialist + Cybersecurity Specialist | 2-3 days | None | Completed (runtime validation passed locally) |
 | TASK-004 | Session hardening (short access + rotating refresh) | Phase 0 | P0 | Senior Backend Specialist + Cybersecurity Specialist + Senior Frontend Specialist | 4-6 days | None | Completed (runtime validation passed locally) |
-| TASK-005 | Socket anti-abuse controls | Phase 0 | P0 | Senior Backend Specialist + Cybersecurity Specialist | 2-3 days | None | In Review (unit + targeted socket validation passed; load validation pending) |
+| TASK-005 | Socket anti-abuse controls | Phase 0 | P0 | Senior Backend Specialist + Cybersecurity Specialist | 2-3 days | None | Completed (unit + burst/flood integration validation passed) |
 | TASK-006 | Distributed realtime state (Redis adapter) | Phase 1 | P1 | Senior Backend Specialist | 2-4 days | TASK-005 | Not Started |
-| TASK-007 | Critical test matrix (API + socket + E2E) | Phase 0 | P0 | QA Specialist | 3-5 days | TASK-003, TASK-004, TASK-005 | In Progress (critical backend suites green locally; E2E pending) |
-| TASK-008 | Conversation/DM domain model (mandatory) | Phase 1 | P0 | Senior Backend Specialist | 5-8 days | TASK-001, TASK-002 | Ready for Implementation (M1 schema/backfill + dual-path kickoff) |
+| TASK-007 | Critical test matrix (API + socket + E2E) | Phase 0 | P0 | QA Specialist | 3-5 days | TASK-003, TASK-004, TASK-005 | In Progress (backend suites + flood coverage green; E2E and DB-backed socket rerun pending) |
+| TASK-008 | Conversation/DM domain model (mandatory) | Phase 1 | P0 | Senior Backend Specialist | 5-8 days | TASK-001, TASK-002 | In Progress (M1 schema/migration/backfill complete; DB-backed migration verification pending) |
 | TASK-009 | Stable socket lifecycle in UI | Phase 1 | P1 | Senior Frontend Specialist | 1-2 days | TASK-004 | Not Started |
 | TASK-010 | Conversation list parity features | Phase 2 | P1 | Senior Frontend Specialist | 3-4 days | TASK-008, TASK-009 | Not Started |
 | TASK-011 | Infinite history with cursor sync | Phase 2 | P2 | Senior Frontend Specialist + Senior Backend Specialist | 2-3 days | TASK-001, TASK-009 | Not Started |
@@ -184,10 +184,12 @@
 - Exit Criteria: Health signals reflect dependency state and support release gating.
 
 ## Risks and Blockers
-- Phase 0 completion gate is partially open: TASK-005 still requires explicit load/flood validation evidence under sustained traffic.
+- Phase 0 completion gate is partially open: TASK-007 still requires E2E minimum y rerun DB-backed de regresión socket en entorno con Docker/Postgres.
 - Residual cross-cutting security risk: HTTP 500 responses may expose internal error details via global error middleware; follow-up hardening required before release gate.
 - Distributed hardening gap: socket event rate limiting remains process-local (single-instance effective, multi-instance bypass risk) until TASK-006.
 - Product policy override risk: TASK-008 starts with locked defaults; any post-kickoff change request may force migration/API adjustments.
+- Infra residual risk for TASK-007: DB-backed socket regression rerun is environment-dependent when Docker/Postgres is unavailable locally.
+- TASK-008 M1 validation blocker: local Docker/Postgres unavailable prevented `prisma migrate deploy` runtime verification and DB-backed regression proof.
 
 ## Decisions Needed
 - None pending for TASK-008 kickoff. Locked defaults:
@@ -258,6 +260,12 @@
 - 2026-04-22 - Project Manager Specialist - TASK-008 decision lock
 	- Applied default product-policy decisions to remove PM blockers and move TASK-008 to implementation-ready state.
 	- Evidence: [.github/reviews/implementation-plan.md](.github/reviews/implementation-plan.md).
+- 2026-04-29 - QA Specialist - TASK-005 load/flood validation
+	- Added socket burst/flood integration validation for anti-abuse controls and confirmed RATE_LIMITED behavior with post-flood socket stability.
+	- Evidence: [apps/api/tests/socket.task005.flood.test.ts](apps/api/tests/socket.task005.flood.test.ts), [apps/api/tests/socket-event-rate-limiter.test.ts](apps/api/tests/socket-event-rate-limiter.test.ts).
+- 2026-04-29 - Senior Backend Specialist - TASK-008 M1 kickoff implement
+	- Implemented additive Conversation/ConversationParticipant model, M1 migration with CHANNEL wrapper backfill and sync triggers, and legacy-compat smoke assertion for message->conversation linkage.
+	- Evidence: [apps/api/prisma/schema.prisma](apps/api/prisma/schema.prisma), [apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql](apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql), [apps/api/tests/messages.task001.test.ts](apps/api/tests/messages.task001.test.ts).
 
 ## Change Log
 - 2026-04-22: Initial plan generated from specialist discovery findings.
@@ -277,3 +285,6 @@
 - 2026-04-22: Phase 1 advanced to TASK-008 discovery for mandatory DM/conversation domain model.
 - 2026-04-22: TASK-008 discovery document consolidated and decisions required updated before M1 implementation.
 - 2026-04-22: PM locked TASK-008 product defaults and removed decision blockers; execution scope moved to implementation-ready.
+- 2026-04-29: TASK-005 load/flood validation evidence captured via integration suite; TASK-005 promoted to Completed.
+- 2026-04-29: Next active milestone set to TASK-008 M1 kickoff (schema/backfill + dual-path start).
+- 2026-04-29: TASK-008 M1 implemented (schema + migration + backfill + sync triggers); pending DB-backed migration verification.

@@ -197,5 +197,31 @@ describe("TASK-001 message idempotency", () => {
     });
 
     expect(persistedCount).toBe(2);
+
+    const persistedFirstMessage = await prisma.message.findUnique({
+      where: {
+        id: firstMessage.id
+      },
+      select: {
+        conversationId: true
+      }
+    });
+
+    expect(persistedFirstMessage?.conversationId).toBeTruthy();
+
+    const wrapperConversation = await prisma.conversation.findUnique({
+      where: {
+        id: persistedFirstMessage!.conversationId!
+      },
+      select: {
+        type: true,
+        channelId: true
+      }
+    });
+
+    expect(wrapperConversation).toMatchObject({
+      type: "CHANNEL",
+      channelId
+    });
   });
 });

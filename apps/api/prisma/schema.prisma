@@ -15,14 +15,16 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  createdChannels     Channel[]            @relation("channel_creator")
-  memberships         ChannelMember[]
-  messages            Message[]
-  messageReceipts     MessageReceipt[]
-  presences           UserPresence[]
-  typingStates        TypingState[]
-  channelJoinRequests ChannelJoinRequest[]
-  refreshTokens       RefreshToken[]
+  createdChannels          Channel[]                 @relation("channel_creator")
+  createdConversations     Conversation[]            @relation("conversation_creator")
+  memberships              ChannelMember[]
+  conversationParticipants ConversationParticipant[]
+  messages                 Message[]
+  messageReceipts          MessageReceipt[]
+  presences                UserPresence[]
+  typingStates             TypingState[]
+  channelJoinRequests      ChannelJoinRequest[]
+  refreshTokens            RefreshToken[]
 }
 
 model RefreshToken {
@@ -47,10 +49,42 @@ model Channel {
   createdAt   DateTime          @default(now())
 
   createdBy    User                 @relation("channel_creator", fields: [createdById], references: [id])
+  conversation Conversation?
   members      ChannelMember[]
   messages     Message[]
   typing       TypingState[]
   joinRequests ChannelJoinRequest[]
+}
+
+model Conversation {
+  id          String           @id @default(cuid())
+  type        ConversationType
+  channelId   String?          @unique
+  createdById String
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  channel      Channel?                  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  createdBy    User                      @relation("conversation_creator", fields: [createdById], references: [id])
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([type, createdAt(sort: Desc)])
+  @@index([createdById])
+}
+
+model ConversationParticipant {
+  id             String      @id @default(cuid())
+  conversationId String
+  userId         String
+  role           ChannelRole @default(MEMBER)
+  joinedAt       DateTime    @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
 }
 
 model ChannelJoinRequest {
@@ -86,6 +120,7 @@ model ChannelMember {
 model Message {
   id              String    @id @default(cuid())
   channelId       String
+  conversationId  String?
   authorId        String
   clientMessageId String?
   body            String
@@ -93,12 +128,14 @@ model Message {
   updatedAt       DateTime  @updatedAt
   deletedAt       DateTime?
 
-  channel  Channel          @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  author   User             @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  receipts MessageReceipt[]
+  channel      Channel          @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  conversation Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  author       User             @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  receipts     MessageReceipt[]
 
   @@unique([channelId, authorId, clientMessageId])
   @@index([channelId, createdAt(sort: Desc)])
+  @@index([conversationId, createdAt(sort: Desc)])
   @@index([authorId])
 }
 
@@ -164,4 +201,9 @@ enum ChannelRequestStatus {
   PENDING
   APPROVED
   DENIED
+}
+
+enum ConversationType {
+  CHANNEL
+  DIRECT
 }

@@ -249,3 +249,43 @@ Method: Code review + specialist delegation
 - Status: Open (non-blocking hardening).
 - Evidence:
   - [apps/api/src/modules/messages/message-receipt.schema.ts](apps/api/src/modules/messages/message-receipt.schema.ts)
+
+## Execution Findings Update (2026-04-29 - Phase 0 TASK-005)
+
+### QA-T005-001
+- Severity: Medium
+- Area: Anti-abuse load validation
+- Summary: Faltaba evidencia de burst/flood real en integración socket para confirmar comportamiento RATE_LIMITED bajo carga concurrente.
+- Status: Mitigated (se agregó suite de integración flood con validación de throttling y estabilidad post-flood).
+- Evidence:
+  - [apps/api/tests/socket.task005.flood.test.ts](apps/api/tests/socket.task005.flood.test.ts)
+  - [apps/api/tests/socket-event-rate-limiter.test.ts](apps/api/tests/socket-event-rate-limiter.test.ts)
+
+### QA-T007-001
+- Severity: Low
+- Area: Validation environment dependency
+- Summary: Re-ejecución de regresiones socket DB-backed depende de disponibilidad local de Docker/Postgres.
+- Status: Open (environment-dependent; non-blocking for TASK-005 closure).
+- Evidence:
+  - [apps/api/tests/messages.socket.task001.test.ts](apps/api/tests/messages.socket.task001.test.ts)
+  - [apps/api/tests/messages.socket.task002.test.ts](apps/api/tests/messages.socket.task002.test.ts)
+
+## Execution Findings Update (2026-04-29 - Phase 1 TASK-008 M1)
+
+### BE-T008-001
+- Severity: High
+- Area: Domain model migration
+- Summary: TASK-008 requería bootstrap de Conversation/ConversationParticipant sin romper paths legacy de channels/messages.
+- Status: Mitigated in M1 (schema aditivo + migration/backfill/triggers de compatibilidad implementados).
+- Evidence:
+  - [apps/api/prisma/schema.prisma](apps/api/prisma/schema.prisma)
+  - [apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql](apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql)
+
+### QA-T008-001
+- Severity: Medium
+- Area: Validation completeness
+- Summary: Validación runtime DB-backed de `prisma migrate deploy` y regresión de mensajes para M1 no pudo completarse por indisponibilidad local de Docker/Postgres.
+- Status: Open (blocked by environment).
+- Evidence:
+  - [apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql](apps/api/prisma/migrations/20260429173000_conversations_m1/migration.sql)
+  - [apps/api/tests/messages.task001.test.ts](apps/api/tests/messages.task001.test.ts)
