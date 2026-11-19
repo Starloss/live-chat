@@ -1,5 +1,7 @@
 # live-chat
 
+[![CI](https://github.com/Starloss/live-chat/actions/workflows/ci.yml/badge.svg)](https://github.com/Starloss/live-chat/actions/workflows/ci.yml)
+
 A real-time chat built as a production-minded monorepo: secure sessions, channels with invitations, presence and read receipts over Socket.IO, backed by PostgreSQL and an optional Redis adapter for horizontal scaling.
 
 ## Features
