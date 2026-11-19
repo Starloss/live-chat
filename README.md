@@ -1,155 +1,118 @@
 # live-chat
 
-Monorepo base para un Realtime Chat orientado a entrevistas.
+A real-time chat built as a production-minded monorepo: secure sessions, channels with invitations, presence and read receipts over Socket.IO, backed by PostgreSQL and an optional Redis adapter for horizontal scaling.
 
-## Estructura
+## Features
 
-- `apps/web`: frontend con React + Vite + TypeScript.
-- `apps/api`: backend con Express + Socket.IO + TypeScript.
-- `packages/shared`: tipos compartidos entre frontend y backend.
+- **Secure sessions.** Short-lived access tokens plus long-lived **rotating refresh tokens**, stored hashed in the database and sent only in an `HttpOnly` cookie, so JavaScript never sees them. Logout revokes the current token.
+- **Channels.** Public and private channels, discovery search, invitations by username or email, and owner-managed join requests.
+- **Real-time messaging.** Socket.IO namespace with typing indicators, presence, system messages and **delivered/read receipts**.
+- **Reliable writes.** **Idempotent message sends**, so a retried request never duplicates a message, and cursor-based pagination of history.
+- **Scales out.** Optional **Redis adapter** to share real-time state across API instances.
+- **Hardened.** Rate limiting on the REST API (stricter on auth) and per-event limits on the socket, uniform JSON errors, and `/health` (liveness) and `/readyz` (readiness, checks the database and Redis) endpoints.
 
-## Stack inicial
+## Architecture
 
-- Frontend: React 19, Vite, TypeScript, socket.io-client.
-- Backend: Node.js, Express, Socket.IO, TypeScript.
-- Workspace: pnpm workspaces.
+```mermaid
+flowchart LR
+    web["apps/web<br/>React 19 + Vite"] -- "REST /api" --> api["apps/api<br/>Express"]
+    web <-- "Socket.IO /chat" --> api
+    api --> db[("PostgreSQL<br/>Prisma")]
+    api -. "optional adapter" .-> redis[("Redis")]
+    shared["packages/shared<br/>shared types"] --- web
+    shared --- api
+```
 
-## Primer arranque
+## Stack
 
-1. Instalar dependencias:
+| Layer | Tech |
+| --- | --- |
+| Frontend | React 19, Vite, TypeScript, socket.io-client |
+| Backend | Node.js, Express, Socket.IO, TypeScript |
+| Data | PostgreSQL 17, Prisma, Redis 7 (optional) |
+| Tooling | pnpm workspaces, Docker Compose, GitHub Actions |
+| Testing | Vitest for the API (REST and sockets), Playwright for end-to-end |
 
-	```bash
-	pnpm install
-	```
+## Testing
 
-2. Configurar variables del API:
+- **API:** suites for auth, channels, messages, socket events, readiness and rate limiting (`apps/api/tests`).
+- **End-to-end:** a Playwright flow from a signed-out session to login and conversation navigation, with the API mocked so it runs without a database (`apps/web/e2e`).
+- **CI:** every push and pull request to `main` installs, generates the Prisma client, runs the migrations against a Postgres service, typechecks and runs the API tests.
 
-	- Copiar `apps/api/.env.example` a `apps/api/.env`.
+## Run locally
 
-3. Levantar PostgreSQL con Docker:
+Requirements: Node 20+, pnpm 10 and Docker.
 
-	```bash
-	pnpm db:up
-	```
+```bash
+pnpm install
+cp apps/api/.env.example apps/api/.env
 
-	- Opcional (TASK-006): para estado realtime distribuido, levantar tambien Redis:
+pnpm db:up                       # PostgreSQL on localhost:5433
+docker compose up -d redis       # optional, set REDIS_ENABLED=true to use it
 
-	```bash
-	docker compose up -d redis
-	```
+pnpm --filter @live-chat/api prisma:migrate --name init
+pnpm --filter @live-chat/api prisma:generate
 
-4. Ejecutar Prisma:
+pnpm dev                         # web on :5173, API on :4000
+```
 
-	```bash
-	pnpm --filter @live-chat/api prisma:migrate --name init
-	pnpm --filter @live-chat/api prisma:generate
-	```
+Tests:
 
-5. Levantar frontend + backend:
+```bash
+pnpm test:api
+pnpm --filter @live-chat/web exec playwright install chromium
+pnpm test:e2e:web
+```
 
-	```bash
-	pnpm dev
-	```
+<details>
+<summary><b>API reference</b></summary>
 
-7. (Opcional) Ejecutar smoke tests del API:
-
-	```bash
-	pnpm test:api
-	```
-
-Ejecutar E2E mínimo del frontend (TASK-007):
-
-	```bash
-	pnpm --filter @live-chat/web exec playwright install chromium
-	pnpm test:e2e:web
-	```
-
-	- El escenario E2E usa mocks controlados del API desde Playwright para evitar dependencia de DB/servicios externos.
-
-8. CI en GitHub:
-
-	- Workflow en `.github/workflows/ci.yml`.
-	- Corre en cada push/PR a `main`.
-	- Ejecuta: instalación, `prisma generate`, migraciones, `typecheck` y tests de API.
-
-6. URLs:
-
-- Web: http://localhost:5173
-- API: http://localhost:4000
-- PostgreSQL (Docker): localhost:5433
-- Redis (Docker, opcional): localhost:6379
-
-## Operabilidad
-
-- `GET /health`: liveness simple del proceso (no verifica dependencias).
-- `GET /readyz`: readiness real para gating (verifica DB y Redis cuando `REDIS_ENABLED=true`).
-
-## Auth endpoints (MVP)
+### Auth
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
-- `POST /api/auth/refresh` (usa refresh token en cookie HttpOnly)
-- `POST /api/auth/logout` (revoca refresh token actual y limpia cookie)
+- `POST /api/auth/refresh` (refresh token from the `HttpOnly` cookie)
+- `POST /api/auth/logout` (revokes the current refresh token and clears the cookie)
 - `GET /api/auth/me` (Bearer token)
 
-### Sesion segura (TASK-004)
+### Channels
 
-- Access token de corta duracion (configurable con `ACCESS_TOKEN_TTL_MINUTES`, default 15 min).
-- Refresh token rotatorio de larga duracion (configurable con `REFRESH_TOKEN_TTL_DAYS`, default 30 dias sliding).
-- Refresh token almacenado hasheado en DB para revocacion y rotacion por uso.
-- El refresh token nunca se expone a JavaScript; viaja solo en cookie HttpOnly.
+- `GET /api/channels`
+- `GET /api/channels/discover?query=<text>`
+- `POST /api/channels` with `{ "name": "general", "visibility": "PUBLIC" | "PRIVATE" }`
+- `POST /api/channels/:channelId/invitations` (owner of a private channel) with `{ "username": "..." }` or `{ "email": "..." }`
+- `POST /api/channels/:channelId/invitations/accept`
+- `POST /api/channels/:channelId/join` (public: direct join; private: needs a pending invitation)
+- `GET /api/channels/:channelId/members`
+- `GET /api/channels/:channelId/requests` (owner)
+- `POST /api/channels/:channelId/requests/:requestId/approve` (owner)
+- `POST /api/channels/:channelId/requests/:requestId/deny` (owner)
 
-## Channels endpoints (MVP)
+### Messages and presence
 
-- `GET /api/channels` (Bearer token)
-- `GET /api/channels/discover?query=<text>` (Bearer token, búsqueda de canales activos)
-- `POST /api/channels` (Bearer token, body: `{ "name": "general", "visibility": "PUBLIC" | "PRIVATE" }`)
-- `POST /api/channels/:channelId/invitations` (Bearer token, solo OWNER en canales PRIVATE, body: `{ "username": "usuario" }` o `{ "email": "correo@dominio" }`)
-- `POST /api/channels/:channelId/invitations/accept` (Bearer token, acepta invitación pendiente en canales PRIVATE)
-- `POST /api/channels/:channelId/join` (Bearer token, público=join directo; privado=solo si existe invitación pendiente)
-- `GET /api/channels/:channelId/members` (Bearer token, requiere membresía)
-- `GET /api/channels/:channelId/requests` (Bearer token, solo OWNER, listado de invitaciones pendientes)
-- `POST /api/channels/:channelId/requests/:requestId/approve` (Bearer token, solo OWNER, gestión manual opcional)
-- `POST /api/channels/:channelId/requests/:requestId/deny` (Bearer token, solo OWNER, gestión manual opcional)
+- `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30[&conversationId=<id>]`
+- `POST /api/channels/:channelId/messages` with `{ "body": "hi", "conversationId"?: "..." }`
+- `POST /api/channels/:channelId/messages/:messageId/receipt` with `{ "status": "DELIVERED" | "READ" }`
+- `GET /api/conversations/:conversationId/messages?cursor=<messageId>&limit=30`
+- `POST /api/conversations/:conversationId/messages` with `{ "body": "hi" }`
+- `GET /api/presence?channelId=<id>`
 
-## Messages endpoints (MVP)
+All of them except register, login and refresh need a Bearer token, and channel routes need membership.
 
-- `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30` (Bearer token, requiere membresía; incluye `viewerReceipt` por mensaje para el usuario autenticado)
-- `GET /api/channels/:channelId/messages?cursor=<messageId>&limit=30&conversationId=<conversationId>` (Bearer token, requiere membresía; `conversationId` opcional para lectura conversation-aware)
-- `POST /api/channels/:channelId/messages` (Bearer token, body: `{ "body": "hola", "conversationId"?: "..." }`, requiere membresía)
-- `POST /api/channels/:channelId/messages/:messageId/receipt` (Bearer token, body: `{ "status": "DELIVERED" | "READ" }`, requiere membresía)
-- `GET /api/conversations/:conversationId/messages?cursor=<messageId>&limit=30` (Bearer token, scope por conversación)
-- `POST /api/conversations/:conversationId/messages` (Bearer token, body: `{ "body": "hola" }`, scope por conversación)
+### Socket.IO
 
-## Presence endpoint (MVP)
+Namespace `/chat`, authenticated in the handshake with `auth: { token: <JWT> }`.
 
-- `GET /api/presence?channelId=<id>` (Bearer token, requiere membresía en el canal)
+- Client → server: `channel:join`, `message:send`, `message:receipt`, `typing:start`, `typing:stop`
+- Server → client: `channel:joined`, `message:new`, `message:receipt:update`, `presence:update`, `typing:update`, `system:message`
 
-## Socket.IO (MVP)
+### Operations
 
-- Namespace: `/chat`
-- Auth en handshake: `auth: { token: <JWT> }`
-- Eventos cliente -> servidor:
-	- `channel:join` con `{ channelId }`
-	- `message:send` con `{ channelId?, conversationId?, body }` (requiere al menos uno de `channelId` o `conversationId`)
-	- `message:receipt` con `{ channelId, messageId, status: "DELIVERED" | "READ" }`
-	- `typing:start` con `{ channelId }`
-	- `typing:stop` con `{ channelId }`
-- Eventos servidor -> cliente:
-	- `channel:joined`
-	- `message:new`
-	- `message:receipt:update`
-	- `presence:update`
-	- `typing:update`
-	- `system:message`
+- `GET /health`: process liveness, no dependency checks.
+- `GET /readyz`: readiness for traffic gating; checks the database, and Redis when `REDIS_ENABLED=true`.
 
-## Hardening básico
+</details>
 
-- Rate limiting en `/api` y límites más estrictos en `/api/auth`.
-- Manejo global uniforme de errores (`404` y `500` JSON).
-- Wrappers async en rutas para capturar excepciones de controladores.
-- Rollout TASK-008 M2 controlado por `CONVERSATION_FIRST_DUAL_WRITE_ENABLED` (default `true`).
+## License
 
-## Siguiente paso sugerido
-
-Implementar autenticación, canales y persistencia con PostgreSQL + Prisma.
+[MIT](LICENSE) © Diego Rangel
